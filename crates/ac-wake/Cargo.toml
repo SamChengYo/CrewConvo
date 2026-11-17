@@ -1,0 +1,15 @@
+[package]
+name = "ac-wake"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ac-core.workspace = true
+ac-store.workspace = true
+ac-context.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+ac-decider.workspace = true
+serde_json.workspace = true

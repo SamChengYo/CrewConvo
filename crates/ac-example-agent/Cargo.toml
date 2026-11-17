@@ -1,0 +1,18 @@
+[package]
+name = "ac-example-agent"
+version.workspace = true
+edition.workspace = true
+description = "Minimal external CrewConvo agent (WebSocket events + REST actions)"
+
+[[bin]]
+name = "crewconvo-example-agent"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "ac-context"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ac-core.workspace = true
+ac-store.workspace = true
+ac-llm.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

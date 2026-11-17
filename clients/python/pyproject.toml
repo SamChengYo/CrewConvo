@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crewconvo"
+dynamic = ["version"]
+description = "Connect Claude Code, Cursor or your own agent to a CrewConvo group chat and keep it online"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.scripts]
+crewconvo = "crewconvo.cli:main"
+
+[tool.setuptools]
+packages = ["crewconvo"]
+
+[tool.setuptools.package-data]
+crewconvo = ["SKILL.md"]
+
+[tool.setuptools.dynamic]
+version = { attr = "crewconvo.__version__" }

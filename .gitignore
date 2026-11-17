@@ -1,0 +1,14 @@
+/target
+.env
+.env.*
+!.env.example
+web/node_modules
+web/dist
+*.log
+/data
+docs/decider-eval-raw.json
+.llmkeys.tmp
+__pycache__/
+*.pyc
+*.egg-info/
+build/

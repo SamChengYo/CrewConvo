@@ -1,0 +1,174 @@
+//! HTTP / WebSocket server: human API, agent protocol (WebSocket, REST, MCP, webhooks),
+//! realtime events, static web UI.
+
+pub mod a2a;
+pub mod agent_api;
+mod api;
+mod config;
+mod error;
+pub mod integrations;
+pub mod longpoll;
+pub mod mcp;
+mod session;
+pub mod webhook;
+mod ws;
+
+pub use config::ServerConfig;
+
+use std::sync::Arc;
+
+use ac_context::{ContextAssembler, ContextBudget, Summarizer};
+use ac_core::bus::Bus;
+use ac_decider::{DeciderChain, SecretBox};
+use ac_llm::LlmRegistry;
+use ac_runtime::BuiltinRuntime;
+use ac_sandbox::{DockerSandbox, DockerSandboxConfig, Sandbox};
+use ac_search::SearchService;
+use ac_service::Service;
+use ac_store::Store;
+use ac_wake::WakeEngine;
+use axum::Router;
+use tower_http::services::{ServeDir, ServeFile};
+use tower_http::trace::TraceLayer;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub service: Service,
+    pub runtime: Arc<BuiltinRuntime>,
+    pub config: Arc<ServerConfig>,
+    pub llm_providers: Arc<Vec<String>>,
+    pub summarizer: Summarizer,
+    pub webhooks: Arc<webhook::WebhookManager>,
+    pub a2a: Arc<a2a::A2aManager>,
+    pub polls: longpoll::PollHub,
+}
+
+pub struct App {
+    pub state: AppState,
+    pub router: Router,
+}
+
+/// Wires every component together.
+pub async fn build(config: ServerConfig, llm: LlmRegistry) -> anyhow::Result<App> {
+    build_with_sandbox(config, llm, None).await
+}
+
+/// Like [`build`], with an explicit sandbox backend (tests).
+pub async fn build_with_sandbox(
+    config: ServerConfig,
+    llm: LlmRegistry,
+    sandbox_override: Option<Arc<dyn Sandbox>>,
+) -> anyhow::Result<App> {
+    let store = Store::connect(&config.db, config.db_max_connections).await?;
+    store.migrate().await?;
+    let bus = Bus::new();
+
+    let secrets = match &config.master_key {
+        Some(k) => SecretBox::from_base64(k).map_err(anyhow::Error::msg)?,
+        None => {
+            tracing::warn!(
+                "CREWCONVO_MASTER_KEY not set: using an ephemeral key; stored secrets will not survive a restart"
+            );
+            SecretBox::ephemeral()
+        }
+    };
+    let decider = Arc::new(DeciderChain::new(secrets, config.egress));
+
+    let context = ContextAssembler::new(store.clone(), config.limits.clone(), ContextBudget::default());
+    let engine = WakeEngine::start(store.clone(), bus.clone(), config.limits.clone(), context, decider.clone());
+
+    let search = SearchService::open(store.clone(), config.search_index_dir.clone())?;
+    search.start_indexer(&bus);
+
+    let sandbox: Option<Arc<dyn Sandbox>> = match sandbox_override {
+        Some(s) => Some(s),
+        None if config.sandbox => {
+            let sb = DockerSandbox::new(DockerSandboxConfig::from_env());
+            if sb.available().await {
+                tracing::info!(image = %sb.config().image, "docker sandbox available");
+                Some(sb as Arc<dyn Sandbox>)
+            } else {
+                tracing::warn!("docker is not reachable: sandbox tools disabled");
+                None
+            }
+        }
+        None => None,
+    };
+
+    let service = Service::new(store.clone(), engine.clone(), search.clone(), sandbox, decider);
+    let llm_providers = Arc::new(llm.provider_names());
+    let summarizer = Summarizer::new(store, llm.clone(), config.summary.clone());
+    summarizer.start(&bus);
+    let runtime = BuiltinRuntime::new(service.clone(), llm);
+    let webhooks = webhook::WebhookManager::new(service.clone());
+    let a2a = a2a::A2aManager::new(service.clone());
+    if config.manage_existing {
+        store_reset_presence(&service).await;
+        runtime.load_all().await?;
+        webhooks.load_all().await?;
+        a2a.load_all().await?;
+        {
+            // Platform catalogs are re-read every 10 minutes: new agents appear, removed ones go away.
+            let service = service.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    service.sync_all_providers().await;
+                }
+            });
+        }
+        engine.recover().await?;
+        search.ensure_populated();
+    }
+    let polls = longpoll::PollHub::default();
+    {
+        // Pollers that stopped polling go offline.
+        let polls = polls.clone();
+        let service = service.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                for id in polls.reap() {
+                    if let Ok(Some(a)) = service.store().get_agent(id).await {
+                        let _ = service.agent_connection_changed(&a, false).await;
+                    }
+                }
+            }
+        });
+    }
+    let state =
+        AppState { service, runtime, config: Arc::new(config), llm_providers, summarizer, webhooks, a2a, polls };
+    let router = router(state.clone());
+    Ok(App { state, router })
+}
+
+fn router(state: AppState) -> Router {
+    let mcp = Router::new()
+        .nest_service("/mcp", mcp::service(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), mcp::auth));
+    let mut app = Router::new()
+        .merge(api::routes())
+        .merge(ws::routes())
+        .merge(agent_api::routes())
+        .merge(integrations::routes())
+        .with_state(state.clone())
+        .merge(mcp);
+    if let Some(dir) = &state.config.web_dist
+        && dir.join("index.html").exists()
+    {
+        let serve = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
+        app = app.fallback_service(serve);
+    }
+    app.layer(TraceLayer::new_for_http())
+}
+
+async fn store_reset_presence(service: &Service) {
+    match service.store().reset_external_presence().await {
+        Ok(n) if n > 0 => tracing::info!(count = n, "external agents marked offline until they reconnect"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not reset external agent presence"),
+    }
+}

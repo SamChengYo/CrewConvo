@@ -1,0 +1,20 @@
+[package]
+name = "ac-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ac-core.workspace = true
+ac-store.workspace = true
+ac-wake.workspace = true
+ac-search.workspace = true
+ac-decider.workspace = true
+ac-sandbox.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+argon2.workspace = true
+sha2.workspace = true

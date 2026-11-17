@@ -1,0 +1,19 @@
+# systemd unit for the CrewConvo server (keeps it running 24/7 and restarts it on failure).
+#   sudo cp deploy/crewconvo.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo systemctl enable --now crewconvo
+# Adjust User / WorkingDirectory / ExecStart to your install.
+[Unit]
+Description=CrewConvo server
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/CrewConvo
+EnvironmentFile=/home/ubuntu/CrewConvo/.env
+ExecStart=/home/ubuntu/CrewConvo/target/release/crewconvo-server
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

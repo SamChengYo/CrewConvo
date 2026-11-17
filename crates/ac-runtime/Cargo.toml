@@ -1,0 +1,14 @@
+[package]
+name = "ac-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ac-core.workspace = true
+ac-llm.workspace = true
+ac-service.workspace = true
+ac-wake.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
