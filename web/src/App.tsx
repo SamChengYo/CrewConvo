@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, ApiError, type Agent, type ConversationItem, type Member } from './api'
+import { api, api2, ApiError, type Agent, type ConversationItem, type Member } from './api'
 import { realtime, useRealtime } from './realtime'
 import Login from './components/Login'
 import Sidebar from './components/Sidebar'
@@ -9,12 +9,11 @@ import AgentsPage from './components/AgentsPage'
 import DecidersPage from './components/DecidersPage'
 import SearchPanel from './components/SearchPanel'
 import ActivityPage from './components/ActivityPage'
-import IntegrationsPage from './components/IntegrationsPage'
 import ConnectPage from './components/ConnectPage'
 import GroupsPage from './components/GroupsPage'
 import { NewChannelModal, NewDmModal, BrowseChannelsModal } from './components/Modals'
 
-type View = { kind: 'conversation'; id: string } | { kind: 'agents' } | { kind: 'deciders' } | { kind: 'activity' } | { kind: 'integrations' } | { kind: 'groups' } | { kind: 'connect'; code: string } | { kind: 'empty' }
+type View = { kind: 'conversation'; id: string } | { kind: 'agents' } | { kind: 'deciders' } | { kind: 'activity' } | { kind: 'groups' } | { kind: 'connect'; code: string } | { kind: 'empty' }
 type ModalKind = 'channel' | 'dm' | 'browse' | null
 
 export default function App() {
@@ -58,6 +57,11 @@ function Workspace({ me, onLogout }: { me: Member; onLogout: () => void }) {
   const [modal, setModal] = useState<ModalKind>(null)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState<string | null>(null)
+  const [edition, setEdition] = useState<'personal' | 'enterprise'>('enterprise')
+
+  useEffect(() => {
+    api2.system().then((s) => setEdition(s.edition)).catch(() => {})
+  }, [])
 
   const reload = useCallback(async () => {
     try {
@@ -150,16 +154,16 @@ function Workspace({ me, onLogout }: { me: Member; onLogout: () => void }) {
       <div className="app-body">
         <Sidebar
           me={me}
+          edition={edition}
           convs={convs}
           agents={agents}
           activeId={view.kind === 'conversation' ? view.id : null}
-          page={view.kind === 'agents' || view.kind === 'deciders' || view.kind === 'activity' || view.kind === 'integrations' || view.kind === 'groups' ? view.kind : null}
+          page={view.kind === 'agents' || view.kind === 'deciders' || view.kind === 'activity' || view.kind === 'groups' ? view.kind : null}
           onOpen={(id) => setView({ kind: 'conversation', id })}
           onOpenAgent={openAgent}
           onAgents={() => setView({ kind: 'agents' })}
           onDeciders={() => setView({ kind: 'deciders' })}
           onActivity={() => setView({ kind: 'activity' })}
-          onIntegrations={() => setView({ kind: 'integrations' })}
           onGroups={() => setView({ kind: 'groups' })}
           onNewChannel={() => setModal('channel')}
           onNewDm={() => setModal('dm')}
@@ -190,15 +194,15 @@ function Workspace({ me, onLogout }: { me: Member; onLogout: () => void }) {
           {view.kind === 'agents' && <AgentsPage me={me} convs={convs} onError={setError} onOpenDm={openConversation} />}
           {view.kind === 'deciders' && <DecidersPage onError={setError} />}
           {view.kind === 'activity' && <ActivityPage onOpen={openConversation} onError={setError} />}
-          {view.kind === 'integrations' && <IntegrationsPage isAdmin={me.is_admin} onError={setError} />}
           {view.kind === 'groups' && <GroupsPage me={me} agents={agents} members={members} onError={setError} />}
           {view.kind === 'connect' && (
             <ConnectPage
               me={me}
               initialCode={view.code}
-              onDone={() => {
+              onDone={async (channelId) => {
                 history.replaceState(null, '', '/')
-                const g = convs.find((c) => c.name === 'general') ?? convs[0]
+                const list = await reload()
+                const g = list.find((c) => c.id === channelId) ?? list.find((c) => c.name === 'general') ?? list[0]
                 setView(g ? { kind: 'conversation', id: g.id } : { kind: 'empty' })
               }}
             />

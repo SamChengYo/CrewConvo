@@ -1,0 +1,42 @@
+# CrewConvo Enterprise with a PostgreSQL container.
+#   cp .env.example .env   # set PG_PASSWORD and PUBLIC_BASE_URL at least
+#   docker compose -f docker-compose.enterprise.yml up -d --build
+# To use your own PostgreSQL (RDS, Cloud SQL, …) instead, remove the `db` service and set
+# DATABASE_URL (or PG_HOST / PG_PORT / PG_USER / PG_PASSWORD / PG_DBNAME / PG_SSL) in .env.
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: crewconvo
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in .env}
+      POSTGRES_DB: crewconvo
+    volumes:
+      - crewconvo-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crewconvo -d crewconvo"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  crewconvo:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      CREWCONVO_EDITION: enterprise
+      PG_HOST: db
+      PG_PORT: "5432"
+      PG_USER: crewconvo
+      PG_DBNAME: crewconvo
+      PG_SSL: "false"
+    ports:
+      - "8090:8090"
+    volumes:
+      - crewconvo-data:/data
+volumes:
+  crewconvo-db:
+  crewconvo-data:

@@ -4,16 +4,16 @@ import { Avatar } from './Avatar'
 
 interface Props {
   me: Member
+  edition: 'personal' | 'enterprise'
   convs: ConversationItem[]
   agents: Agent[]
   activeId: string | null
-  page: 'agents' | 'deciders' | 'activity' | 'integrations' | 'groups' | null
+  page: 'agents' | 'deciders' | 'activity' | 'groups' | null
   onOpen: (id: string) => void
   onOpenAgent: (agentId: string) => void
   onAgents: () => void
   onDeciders: () => void
   onActivity: () => void
-  onIntegrations: () => void
   onGroups: () => void
   onNewChannel: () => void
   onNewDm: () => void
@@ -53,7 +53,7 @@ export default function Sidebar(p: Props) {
     <aside className="sidebar">
       <div className="sb-header">
         <div className="sb-workspace">
-          CrewConvo <span className="sb-ws-caret">▾</span>
+          CrewConvo <span className={`edition-badge ${p.edition}`}>{p.edition === 'personal' ? 'Personal' : 'Enterprise'}</span>
         </div>
         <button className="sb-compose" title="新訊息" onClick={p.onNewDm}>
           ✎
@@ -79,10 +79,6 @@ export default function Sidebar(p: Props) {
               <span className="sb-label">決策模型設定</span>
             </button>
           )}
-          <button className={`sb-item ${p.page === 'integrations' ? 'active' : ''}`} onClick={p.onIntegrations}>
-            <span className="sb-glyph">⇄</span>
-            <span className="sb-label">接入其他平台</span>
-          </button>
           <button className="sb-item" onClick={p.onBrowse}>
             <span className="sb-glyph">⌕</span>
             <span className="sb-label">瀏覽頻道</span>

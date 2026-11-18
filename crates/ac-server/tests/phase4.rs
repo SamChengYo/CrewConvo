@@ -507,13 +507,16 @@ async fn browser_connect_flow_and_agent_channel_visibility() {
     let view = fx.svc().connect_request(&fx.human, &user_code.replace('-', "").to_lowercase()).await.unwrap();
     assert_eq!(view.client["hostname"], "laptop");
     let approve = ac_service::connect::ApproveInput {
-        handle: Some("remote-bot".into()),
-        display_name: Some("Remote".into()),
-        description: Some("其他平台來的 Agent".into()),
-        expertise: vec!["整理".into()],
+        single: ac_service::connect::ApproveAgent {
+            handle: Some("remote-bot".into()),
+            display_name: Some("Remote".into()),
+            description: Some("其他平台來的 Agent".into()),
+            expertise: vec!["整理".into()],
+            ..Default::default()
+        },
         ..Default::default()
     };
-    let agent = fx.svc().connect_approve(&fx.human, &user_code, approve.clone()).await.unwrap();
+    let agent = fx.svc().connect_approve(&fx.human, &user_code, approve.clone()).await.unwrap().agents.remove(0);
     assert_eq!(agent.member.handle, "remote-bot");
     assert!(fx.svc().connect_approve(&fx.human, &user_code, approve).await.is_err(), "a code is approved once");
     let p: Value = poll(c.clone(), base.clone(), device.clone()).await.json().await.unwrap();
@@ -538,7 +541,10 @@ async fn browser_connect_flow_and_agent_channel_visibility() {
         .connect_approve(
             &fx.human,
             s3["user_code"].as_str().unwrap(),
-            ac_service::connect::ApproveInput { agent_id: Some(agent.member.id), ..Default::default() },
+            ac_service::connect::ApproveInput {
+                single: ac_service::connect::ApproveAgent { agent_id: Some(agent.member.id), ..Default::default() },
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -547,6 +553,52 @@ async fn browser_connect_flow_and_agent_channel_visibility() {
     let token2 = p["token"].as_str().unwrap().to_string();
     assert_eq!(c.get(format!("{base}/agent/v1/me")).bearer_auth(&token).send().await.unwrap().status(), 401);
     let token = token2;
+    // One approval for several coding agents: an agent each, plus a group and a private channel.
+    let s4 = start(c.clone(), base.clone()).await;
+    let one = |platform: &str, handle: &str| ac_service::connect::ApproveAgent {
+        platform: Some(platform.into()),
+        handle: Some(handle.into()),
+        description: Some(format!("{platform} on laptop")),
+        ..Default::default()
+    };
+    let res = fx
+        .svc()
+        .connect_approve(
+            &fx.human,
+            s4["user_code"].as_str().unwrap(),
+            ac_service::connect::ApproveInput {
+                agents: vec![one("claude-code", "laptop-claude"), one("codex", "laptop-codex")],
+                group_name: Some("laptop".into()),
+                channel_name: Some("laptop-agents".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(res.warnings.is_empty(), "{:?}", res.warnings);
+    assert_eq!(res.group.as_ref().unwrap().agent_ids.len(), 2);
+    let chan = res.channel.unwrap();
+    assert_eq!(chan.visibility, ac_core::model::Visibility::Private);
+    let members = fx.store().conversation_members(chan.id).await.unwrap();
+    assert_eq!(members.len(), 3, "the approver and both agents");
+    let p: Value =
+        poll(c.clone(), base.clone(), s4["device_code"].as_str().unwrap().to_string()).await.json().await.unwrap();
+    let got: Vec<(String, String)> = p["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| (a["platform"].as_str().unwrap().to_string(), a["handle"].as_str().unwrap().to_string()))
+        .collect();
+    assert_eq!(got, vec![("claude-code".into(), "laptop-claude".into()), ("codex".into(), "laptop-codex".into())]);
+    assert!(p["agents"][1]["token"].as_str().unwrap().starts_with("ccat_"));
+    // A taken name fails before anything is created.
+    let s5 = start(c.clone(), base.clone()).await;
+    let bad = ac_service::connect::ApproveInput {
+        agents: vec![one("cursor", "laptop-cursor"), one("codex", "laptop-codex")],
+        ..Default::default()
+    };
+    assert!(fx.svc().connect_approve(&fx.human, s5["user_code"].as_str().unwrap(), bad).await.is_err());
+    assert!(fx.store().member_by_handle(fx.workspace_id, "laptop-cursor").await.unwrap().is_none());
     let bob = fx.second_human("bob", false).await;
 
     // Channel visibility for agents: only their own channels plus the #general lobby.

@@ -247,3 +247,29 @@ impl Store {
         Ok(())
     }
 }
+
+impl Store {
+    pub async fn set_provider_token(&self, id: Uuid, token_sealed: Option<&str>, name: Option<&str>) -> AppResult<()> {
+        sqlx::query("UPDATE provider_connections SET token_sealed = $2, name = COALESCE($3, name) WHERE id = $1")
+            .bind(id)
+            .bind(token_sealed)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .db()?;
+        Ok(())
+    }
+
+    /// The first admin of a workspace (owner of things created from the configuration).
+    pub async fn first_admin_id(&self, workspace_id: Uuid) -> AppResult<Option<Uuid>> {
+        let row: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM members WHERE workspace_id = $1 AND kind = 'human' AND is_admin \
+             AND deactivated_at IS NULL ORDER BY created_at LIMIT 1",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .db()?;
+        Ok(row.map(|r| r.0))
+    }
+}

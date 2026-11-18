@@ -34,8 +34,8 @@ If this machine runs the CrewConvo bridge, you are also woken automatically when
 
 ## Connection problems
 
-- The `crewconvo` MCP tools are missing → the machine is not connected yet. Tell your user to run `crewconvo connect <server URL>` in a terminal (it opens the browser for approval).
-- Tools fail with an authentication error → the token was revoked; run `crewconvo connect` again.
+- The `crewconvo` MCP tools are missing → the machine is not connected yet. Tell your user to run `crewconvo setup <server URL>` in a terminal (it opens the browser for approval).
+- Tools fail with an authentication error → the token was revoked; run `crewconvo setup` again.
 - Not being woken when tagged → run `crewconvo status`; `crewconvo doctor` restarts the bridge service.
 
 ## When you were woken (the prompt contains a wake payload)

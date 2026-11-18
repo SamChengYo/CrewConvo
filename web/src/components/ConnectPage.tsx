@@ -1,76 +1,105 @@
 import { useEffect, useState } from 'react'
-import { api, connectApi, type Agent, type ConnectRequestView, type Member } from '../api'
+import { api, connectApi, type Agent, type ApproveResult, type ConnectClientAgent, type ConnectRequestView, type Member } from '../api'
 
-function suggestHandle(c: ConnectRequestView['client']) {
-  const base = `${c.user || 'agent'}-${c.platforms?.includes('claude-code') ? 'claude' : c.hostname || 'bot'}`
-  return base
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 32)
+interface Row {
+  platform: string
+  name: string
+  wakeable: boolean
+  /** Reconnect this existing agent instead of creating a new one. */
+  existing: Agent | null
+  reuse: boolean
+  handle: string
+  displayName: string
+  description: string
 }
 
-const PLATFORM_NAMES: Record<string, string> = { 'claude-code': 'Claude Code', cursor: 'Cursor' }
+function rowsFrom(req: ConnectRequestView, mine: Agent[]): Row[] {
+  const c = req.client
+  const list: ConnectClientAgent[] = c.agents?.length
+    ? c.agents
+    : [{ platform: 'custom', name: 'Agent', wakeable: true, suggested_handle: `${c.hostname ?? 'agent'}`.toLowerCase() }]
+  return list.map((a) => {
+    const existing = mine.find((m) => m.member.id === a.existing_agent_id) ?? null
+    return {
+      platform: a.platform,
+      name: a.name,
+      wakeable: a.wakeable,
+      existing,
+      reuse: !!existing,
+      handle: a.suggested_handle,
+      displayName: `${a.name}（${c.hostname ?? ''}）`,
+      description: `${c.user ? `${c.user} 的` : ''}${c.hostname ?? '電腦'}上的 ${a.name}`,
+    }
+  })
+}
 
-export default function ConnectPage({ me, initialCode, onDone }: { me: Member; initialCode: string; onDone: () => void }) {
+export default function ConnectPage({
+  me,
+  initialCode,
+  onDone,
+}: {
+  me: Member
+  initialCode: string
+  onDone: (channelId?: string) => void
+}) {
   const [code, setCode] = useState(initialCode)
   const [req, setReq] = useState<ConnectRequestView | null>(null)
   const [lookupError, setLookupError] = useState<string | null>(null)
-  const [mine, setMine] = useState<Agent[]>([])
-  const [mode, setMode] = useState<'new' | 'existing'>('new')
-  const [existing, setExisting] = useState('')
-  const [handle, setHandle] = useState('')
-  const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
-  const [expertise, setExpertise] = useState('')
+  const [mine, setMine] = useState<Agent[] | null>(null)
+  const [rows, setRows] = useState<Row[]>([])
+  const [group, setGroup] = useState('')
+  const [channel, setChannel] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<{ ok: boolean; agent?: Agent } | null>(null)
+  const [result, setResult] = useState<ApproveResult | 'denied' | null>(null)
 
-  const lookup = async (c: string) => {
+  useEffect(() => {
+    api
+      .agents()
+      .then((all) =>
+        setMine(all.filter((a) => a.origin === 'external' && !a.provider_connection_id && !a.member.deactivated_at && (a.owner_id === me.id || me.is_admin))),
+      )
+      .catch(() => setMine([]))
+  }, [me])
+
+  const lookup = async (c: string, agents: Agent[]) => {
     setLookupError(null)
     setReq(null)
     if (c.replace(/[^a-z0-9]/gi, '').length < 8) return
     try {
       const r = await connectApi.get(c)
       setReq(r)
-      setHandle((h) => h || suggestHandle(r.client))
-      setName((n) => n || (r.client.platforms?.includes('claude-code') ? `Claude（${r.client.hostname ?? ''}）` : r.client.hostname ?? ''))
+      setRows(rowsFrom(r, agents))
+      setGroup(r.client.suggested_group ?? '')
+      setChannel(r.client.suggested_channel ?? '')
     } catch (e) {
       setLookupError(e instanceof Error ? e.message : String(e))
     }
   }
 
   useEffect(() => {
-    lookup(initialCode)
-    api
-      .agents()
-      .then((all) => {
-        const ext = all.filter((a) => a.origin === 'external' && !a.member.deactivated_at && (a.owner_id === me.id || me.is_admin))
-        setMine(ext)
-        if (ext[0]) setExisting(ext[0].member.id)
-      })
-      .catch(() => {})
+    if (mine) lookup(initialCode, mine)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [mine])
+
+  const edit = (i: number, patch: Partial<Row>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)))
 
   const approve = async () => {
     if (!req) return
     setBusy(true)
     setError(null)
     try {
-      const agent = await connectApi.approve(
-        req.user_code,
-        mode === 'existing'
-          ? { agent_id: existing }
-          : {
-              handle: handle.trim(),
-              display_name: name.trim() || undefined,
-              description: description.trim(),
-              expertise: expertise.split(/[,，、]/).map((s) => s.trim()).filter(Boolean),
-            },
+      setResult(
+        await connectApi.approve(req.user_code, {
+          agents: rows.map((r) =>
+            r.reuse && r.existing
+              ? { platform: r.platform, agent_id: r.existing.member.id }
+              : { platform: r.platform, handle: r.handle.trim(), display_name: r.displayName.trim() || undefined, description: r.description.trim() },
+          ),
+          group_name: group.trim() || undefined,
+          channel_name: channel.trim() || undefined,
+        }),
       )
-      setResult({ ok: true, agent })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -83,7 +112,7 @@ export default function ConnectPage({ me, initialCode, onDone }: { me: Member; i
     setBusy(true)
     try {
       await connectApi.deny(req.user_code)
-      setResult({ ok: false })
+      setResult('denied')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -92,26 +121,35 @@ export default function ConnectPage({ me, initialCode, onDone }: { me: Member; i
   }
 
   if (result) {
+    const okRes = result === 'denied' ? null : result
     return (
       <div className="page connect-page">
         <div className="connect-card">
-          {result.ok ? (
+          {okRes ? (
             <>
               <div className="connect-icon ok">✓</div>
               <h1>已核准</h1>
               <p>
-                <b>@{result.agent?.member.handle}</b> 已經接上。回到終端機，crewconvo 會自動完成設定並啟動背景 bridge，完成後這個 Agent 就會顯示為上線。
+                {okRes.agents.map((a) => `@${a.member.handle}`).join('、')} 已經建立。回到終端機，crewconvo 會把它們裝進對應的 Coding Agent 並啟動背景
+                bridge。
               </p>
+              {okRes.group && <p className="muted">群組「{okRes.group.name}」：這些 Agent 互相找得到。</p>}
+              {okRes.channel && <p className="muted">頻道 #{okRes.channel.name}：你和這些 Agent 都在裡面，直接 @ 它們就可以開始。</p>}
+              {okRes.warnings.map((w) => (
+                <p key={w} className="pill-note warn">
+                  {w}
+                </p>
+              ))}
             </>
           ) : (
             <>
               <div className="connect-icon">✕</div>
               <h1>已拒絕</h1>
-              <p>這台電腦不會取得任何權限。</p>
+              <p>那台電腦不會取得任何權限。</p>
             </>
           )}
-          <button className="primary" onClick={onDone}>
-            回到 CrewConvo
+          <button className="primary" onClick={() => onDone(okRes?.channel?.id)}>
+            {okRes?.channel ? `前往 #${okRes.channel.name}` : '回到 CrewConvo'}
           </button>
         </div>
       </div>
@@ -119,14 +157,14 @@ export default function ConnectPage({ me, initialCode, onDone }: { me: Member; i
   }
 
   const pending = req?.status === 'pending'
-  const canApprove = pending && (mode === 'existing' ? !!existing : handle.trim() && description.trim())
+  const valid = rows.length > 0 && rows.every((r) => (r.reuse && r.existing) || (r.handle.trim() && r.description.trim()))
 
   return (
     <div className="page connect-page">
-      <div className="connect-card">
-        <h1>連接一台電腦</h1>
+      <div className="connect-card wide">
+        <h1>連接這台電腦上的 Coding Agent</h1>
         <p className="muted">
-          有人在終端機執行了 <code>crewconvo connect</code>。核准後，那台電腦上的 Agent（例如 Claude Code）就能以下面這個身分加入群聊，被 @ 時自動回應。
+          有人在終端機執行了 <code>crewconvo setup</code>。核准後，下面每個 Coding Agent 都會成為群聊裡的一個 Agent，被 @ 時自動回覆。
         </p>
 
         <label className="connect-code">
@@ -136,7 +174,7 @@ export default function ConnectPage({ me, initialCode, onDone }: { me: Member; i
             placeholder="ABCD-EFGH"
             onChange={(e) => {
               setCode(e.target.value.toUpperCase())
-              lookup(e.target.value)
+              lookup(e.target.value, mine ?? [])
             }}
           />
         </label>
@@ -146,18 +184,11 @@ export default function ConnectPage({ me, initialCode, onDone }: { me: Member; i
           <div className="connect-client">
             <div>
               <b>電腦</b>：{req.client.hostname ?? '（未提供）'}
-              {req.client.user ? `（使用者 ${req.client.user}）` : ''}
-            </div>
-            <div>
-              <b>系統</b>：{req.client.os ?? '—'}
-            </div>
-            <div>
-              <b>偵測到的平台</b>：
-              {req.client.platforms?.length ? req.client.platforms.map((p) => PLATFORM_NAMES[p] ?? p).join('、') : '沒有（會使用通用 MCP 設定）'}
+              {req.client.user ? `（使用者 ${req.client.user}）` : ''}　<b>系統</b>：{req.client.os ?? '—'}
             </div>
             {!pending && (
               <p className="pill-note warn">
-                {req.status === 'expired' ? '代碼已過期，請在終端機重新執行 crewconvo connect。' : '這個代碼已經處理過了。'}
+                {req.status === 'expired' ? '代碼已過期，請在終端機重新執行 crewconvo setup。' : '這個代碼已經處理過了。'}
               </p>
             )}
             {pending && <p className="muted small">請確認終端機上的代碼和上面一致，而且是你自己（或你信任的人）剛剛執行的。</p>}
@@ -166,58 +197,57 @@ export default function ConnectPage({ me, initialCode, onDone }: { me: Member; i
 
         {pending && (
           <>
-            <div className="connect-modes">
-              <label>
-                <input type="radio" checked={mode === 'new'} onChange={() => setMode('new')} /> 建立新的 Agent
+            {rows.map((r, i) => (
+              <div key={r.platform} className="connect-agent">
+                <div className="connect-agent-head">
+                  <b>{r.name}</b>
+                  <span className={`status ${r.wakeable ? 'online' : 'offline'}`}>{r.wakeable ? '被 @ 時會自動回覆' : '只能主動使用'}</span>
+                  {r.existing && (
+                    <label className="connect-reuse">
+                      <input type="checkbox" checked={r.reuse} onChange={(e) => edit(i, { reuse: e.target.checked })} /> 沿用既有的 @
+                      {r.existing.member.handle}
+                    </label>
+                  )}
+                </div>
+                {!(r.reuse && r.existing) && (
+                  <div className="connect-form">
+                    <div className="connect-two">
+                      <label>
+                        <span>名稱（用 @ 呼叫，可以用中文，不能有空白）</span>
+                        <input value={r.handle} onChange={(e) => edit(i, { handle: e.target.value })} />
+                      </label>
+                      <label>
+                        <span>顯示名稱</span>
+                        <input value={r.displayName} onChange={(e) => edit(i, { displayName: e.target.value })} />
+                      </label>
+                    </div>
+                    <label>
+                      <span>它負責什麼（其他成員與 Agent 靠這段判斷要不要找它）</span>
+                      <input value={r.description} onChange={(e) => edit(i, { description: e.target.value })} />
+                    </label>
+                  </div>
+                )}
+              </div>
+            ))}
+
+            <div className="connect-two">
+              <label className="connect-field">
+                <span>Agent 群組（讓這些 Agent 互相找得到；留白就不建立）</span>
+                <input value={group} onChange={(e) => setGroup(e.target.value)} />
               </label>
-              <label className={mine.length ? '' : 'disabled'}>
-                <input type="radio" checked={mode === 'existing'} disabled={!mine.length} onChange={() => setMode('existing')} /> 重新連接既有的外部 Agent
-                {!mine.length && <span className="muted small">（你還沒有外部 Agent）</span>}
+              <label className="connect-field">
+                <span>頻道（你和這些 Agent 的私有頻道；留白就不建立）</span>
+                <input value={channel} onChange={(e) => setChannel(e.target.value)} />
               </label>
             </div>
-
-            {mode === 'new' ? (
-              <div className="connect-form">
-                <label>
-                  <span>Handle（群聊裡用 @ 呼叫的名稱，可以用中文，不能有空白，不能和別人重複）</span>
-                  <input value={handle} onChange={(e) => setHandle(e.target.value)} placeholder="sam-claude" />
-                </label>
-                <label>
-                  <span>顯示名稱</span>
-                  <input value={name} onChange={(e) => setName(e.target.value)} />
-                </label>
-                <label>
-                  <span>它負責什麼（其他 Agent 與決策模型靠這段判斷要不要找它）</span>
-                  <textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Sam 筆電上的 Claude Code，熟悉前端專案與部署" />
-                </label>
-                <label>
-                  <span>專長（逗號分隔，可留白）</span>
-                  <input value={expertise} onChange={(e) => setExpertise(e.target.value)} placeholder="React, 部署" />
-                </label>
-                <p className="muted small">新 Agent 一開始不在任何頻道。核准後，到頻道的成員清單把它邀請進來，或直接私訊它。</p>
-              </div>
-            ) : (
-              <div className="connect-form">
-                <label>
-                  <span>要連接的 Agent（它原本的 token 會失效）</span>
-                  <select value={existing} onChange={(e) => setExisting(e.target.value)}>
-                    {mine.map((a) => (
-                      <option key={a.member.id} value={a.member.id}>
-                        @{a.member.handle}（{a.member.display_name}）{a.status === 'online' ? '・上線中' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            )}
 
             {error && <p className="form-error">{error}</p>}
             <div className="connect-actions">
               <button className="ghost" disabled={busy} onClick={deny}>
                 拒絕
               </button>
-              <button className="primary" disabled={busy || !canApprove} onClick={approve}>
-                核准連線
+              <button className="primary" disabled={busy || !valid} onClick={approve}>
+                核准並建立
               </button>
             </div>
           </>

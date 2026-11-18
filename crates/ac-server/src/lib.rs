@@ -13,7 +13,7 @@ mod session;
 pub mod webhook;
 mod ws;
 
-pub use config::ServerConfig;
+pub use config::{Edition, ProviderSpec, ServerConfig};
 
 use std::sync::Arc;
 
@@ -110,12 +110,24 @@ pub async fn build_with_sandbox(
         {
             // Platform catalogs are re-read every 10 minutes: new agents appear, removed ones go away.
             let service = service.clone();
+            let declared = config.providers.clone();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
-                tick.tick().await;
+                let mut first = true;
                 loop {
-                    tick.tick().await;
-                    service.sync_all_providers().await;
+                    // Connections declared in the configuration (A2A_CONNECTIONS) are applied at
+                    // startup, and again once the first account exists.
+                    if let Some(specs) = &declared
+                        && let Err(e) = service.reconcile_providers(specs).await
+                    {
+                        tracing::warn!(error = %e, "could not apply A2A_CONNECTIONS");
+                    }
+                    if !first {
+                        service.sync_all_providers().await;
+                    }
+                    first = false;
+                    let wait =
+                        if declared.is_some() && !service.has_accounts().await.unwrap_or(true) { 15 } else { 600 };
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                 }
             });
         }

@@ -285,6 +285,8 @@ export interface AgentCredentials {
 }
 
 export interface SystemInfo {
+  edition: 'personal' | 'enterprise'
+  registration_open: boolean
   llm_providers: string[]
   sandbox: boolean
   summaries: boolean
@@ -334,30 +336,6 @@ export const api3 = {
   wakePayload: (wakeId: string) => request<Record<string, unknown>>('GET', `/api/wakes/${wakeId}/payload`),
 }
 
-export interface ConnectRequestView {
-  user_code: string
-  client: { hostname?: string; os?: string; user?: string; platforms?: string[]; cli?: string }
-  status: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired'
-  expires_at: string
-}
-
-export interface ConnectApproval {
-  agent_id?: string
-  handle?: string
-  display_name?: string
-  description?: string
-  expertise?: string[]
-}
-
-export const connectApi = {
-  get: (code: string) => request<ConnectRequestView>('GET', `/api/connect/${encodeURIComponent(code)}`),
-  approve: (code: string, body: ConnectApproval) => request<Agent>('POST', `/api/connect/${encodeURIComponent(code)}/approve`, body),
-  deny: (code: string) => request<unknown>('POST', `/api/connect/${encodeURIComponent(code)}/deny`),
-}
-
-/** Where the CLI is installed from (until it is published on PyPI). */
-export const CLI_SOURCE = 'git+https://github.com/SamChengYo/CrewConvo.git#subdirectory=clients/python'
-
 export interface AgentGroup {
   id: string
   name: string
@@ -375,29 +353,55 @@ export const groupsApi = {
   remove: (id: string) => request<unknown>('DELETE', `/api/agent-groups/${id}`),
 }
 
-export interface ProviderConnection {
-  id: string
+
+export interface AuthInfo {
+  edition: 'personal' | 'enterprise'
+  /** No account exists yet: the first one becomes the owner / admin. */
+  needs_setup: boolean
+  registration_open: boolean
+}
+
+export const authInfo = () => request<AuthInfo>('GET', '/api/auth/info')
+
+/** A coding agent the CLI wants to connect (from `crewconvo setup`). */
+export interface ConnectClientAgent {
+  platform: string
   name: string
-  catalog_url: string
-  external_workspace_id: string | null
-  external_workspace_name: string | null
-  group_id: string | null
-  last_sync_at: string | null
-  last_error: string | null
-  created_at: string
+  wakeable: boolean
+  suggested_handle: string
+  existing_agent_id?: string | null
 }
 
-export interface ProviderSyncReport {
-  connection: ProviderConnection
-  created: string[]
-  updated: number
-  removed: number
-  agents: number
+export interface ConnectRequestView {
+  user_code: string
+  client: {
+    hostname?: string
+    os?: string
+    user?: string
+    cli?: string
+    agents?: ConnectClientAgent[]
+    suggested_group?: string
+    suggested_channel?: string
+  }
+  status: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired'
+  expires_at: string
 }
 
-export const providersApi = {
-  list: () => request<ProviderConnection[]>('GET', '/api/provider-connections'),
-  connect: (body: { url: string; token?: string; name?: string }) => request<ProviderSyncReport>('POST', '/api/provider-connections', body),
-  sync: (id: string) => request<ProviderSyncReport>('POST', `/api/provider-connections/${id}/sync`),
-  remove: (id: string) => request<unknown>('DELETE', `/api/provider-connections/${id}`),
+export interface ConnectApproval {
+  agents: { platform?: string; agent_id?: string; handle?: string; display_name?: string; description?: string }[]
+  group_name?: string
+  channel_name?: string
+}
+
+export interface ApproveResult {
+  agents: Agent[]
+  group: AgentGroup | null
+  channel: Conversation | null
+  warnings: string[]
+}
+
+export const connectApi = {
+  get: (code: string) => request<ConnectRequestView>('GET', `/api/connect/${encodeURIComponent(code)}`),
+  approve: (code: string, body: ConnectApproval) => request<ApproveResult>('POST', `/api/connect/${encodeURIComponent(code)}/approve`, body),
+  deny: (code: string) => request<unknown>('POST', `/api/connect/${encodeURIComponent(code)}/deny`),
 }

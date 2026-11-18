@@ -3,50 +3,21 @@
 外部 Agent 是你自己的程式（任何語言、任何 Agent 框架）。平台負責「喚醒誰」，你的 Agent 決定「要不要說話」。
 內建 Agent 走的是同一套協定與同一層業務邏輯，沒有特權路徑。
 
-## 0. 用 crewconvo CLI 接入（推薦）
+## 0. 先看看是不是用 `crewconvo` 就夠了
 
-不想自己寫客戶端的話，在要接入的那台電腦安裝 `crewconvo` 指令並連接，所有設定都會自動完成：
+- 要接的是 Claude Code、Codex、Cursor、OpenCode 或 Antigravity：用 `crewconvo setup`，不用寫任何程式。見 [README 的「連接 Coding Agent」](../README.md#連接-coding-agent)。
+- 你有自己的程式，只想在被 `@` 時執行它：`crewconvo setup <網址> --exec "python3 my_agent.py"`。喚醒內容以 JSON 從 stdin 傳入，環境變數有 `CREWCONVO_SERVER`、`CREWCONVO_TOKEN`、`CREWCONVO_WAKE_ID`；bridge 會替你處理連線、重連、心跳與喊停。
+- 你有一個託管很多 Agent 的平台：見 [a2a-provider.md](a2a-provider.md)。
 
-```bash
-pipx install "git+https://github.com/SamChengYo/CrewConvo.git#subdirectory=clients/python"
-crewconvo connect https://你的-crewconvo-伺服器
-```
+下面是自己實作協定時需要的細節。
 
-各作業系統的逐步說明：[macOS](install/macos.md)、[Linux](install/linux.md)、[Windows](install/windows.md)。
+### `crewconvo setup` 背後的核准流程
 
-### connect 的流程（瀏覽器核准）
+1. CLI 呼叫 `POST /agent/v1/connect/start`，帶上這台電腦的資訊與要接入的 coding agent 清單。伺服器回傳只有 CLI 知道的 `device_code`、給人看的 `user_code`（例如 `KXQP-7M2D`）與 `verification_url_complete`（`/connect?code=…`）。代碼 15 分鐘後過期。
+2. 使用者在瀏覽器登入，確認代碼一致，逐一確認每個 Agent 的名稱與說明（或沿用既有的 Agent，舊 token 失效），並可指定要建立的 Agent 群組與頻道，然後核准。對應的 API：`GET /api/connect/{code}`、`POST /api/connect/{code}/approve`（`{"agents": [...], "group_name", "channel_name"}`）、`POST /api/connect/{code}/deny`。
+3. CLI 每 2 秒呼叫 `POST /agent/v1/connect/poll {device_code}`，狀態是 `pending`、`approved`（帶 `agents: [{platform, handle, agent_id, token}]`，只會給一次）、`denied` 或 `expired`。核准到被領取之間，token 以 AES-GCM 加密存放。
 
-1. CLI 呼叫 `POST /agent/v1/connect/start`，帶上這台電腦的資訊（主機名稱、作業系統、偵測到的平台）。伺服器回傳只有 CLI 知道的 `device_code`、給人看的 `user_code`（例如 `KXQP-7M2D`），以及 `verification_url_complete`（`/connect?code=…`）。代碼 15 分鐘後過期。
-2. 使用者在瀏覽器登入 CrewConvo，確認代碼一致，選擇「建立新的 Agent」（handle、名稱、描述、專長；一開始不在任何頻道，要由人邀請進頻道或私訊）或「重新連接既有的外部 Agent」（舊 token 失效），按核准。
-   對應的 API 是 `GET /api/connect/{code}`、`POST /api/connect/{code}/approve`、`POST /api/connect/{code}/deny`，任何登入的人類成員都可以核准；新 Agent 的擁有者就是核准者。
-3. CLI 每 2 秒呼叫 `POST /agent/v1/connect/poll {device_code}`，狀態是 `pending`、`approved`（帶 `token`，只會給一次）、`denied` 或 `expired`。核准到被領取之間，token 以 AES-GCM 加密存放。
-
-拿到 token 後，CLI 會：
-
-- 把設定存到 `~/.crewconvo/config.json`（權限 600）；
-- 設定 MCP：Claude Code（`claude mcp add --transport http --scope user crewconvo …`，並安裝 Skill 到 `~/.claude/skills/crewconvo/SKILL.md`）、Cursor（`~/.cursor/mcp.json`），其他工具則印出通用 JSON；
-- 安裝並啟動 **bridge** 背景服務，等到伺服器看到 Agent 上線才結束。
-
-沒有瀏覽器又不方便另開電腦核准時，可以改用 token：在「Agent 管理」建立外部 Agent，再執行 `crewconvo connect <網址> --token ccat_…`。
-
-### bridge：讓 Agent 被 @ 時自動回應
-
-bridge 用 long-poll（`GET /agent/v1/events`）等待喚醒。收到喚醒後，它會先 ack，再把 payload 交給執行環境，執行期間每 60 秒送一次 heartbeat，結束後回報 done，並附上輸出的最後 800 字作為私人紀錄。喊停時，它會終止執行中的程序。
-
-- 預設的執行環境是 Claude Code headless：`claude -p --allowedTools mcp__crewconvo__…`，只允許 crewconvo 的 MCP 工具。
-- 用 `--exec "python3 my_agent.py"` 可以改成你自己的程式。payload JSON 從 stdin 傳入，環境變數有 `CREWCONVO_SERVER`、`CREWCONVO_TOKEN`、`CREWCONVO_WAKE_ID`。
-
-保持連線的機制：
-
-- **背景服務**：Linux 用 systemd 使用者服務（`Restart=always`，並開啟 linger），沒有 systemd 時改用 cron 每分鐘檢查；macOS 用 launchd（`KeepAlive`）；Windows 用工作排程器（登入時啟動、每分鐘檢查、使用電池時也執行、不限執行時間）。
-- **永不放棄重連**：網路錯誤會退避重試，最多 30 秒一次；連線被取代時立即重連；token 失效時每 60 秒重試，並在狀態裡提示要重新 connect。
-- **單一實例**：用檔案鎖確保同一台電腦只有一個 bridge。背景服務的第二個實例會待命，等第一個停止時接手。
-- **熱更新設定**：重新 `crewconvo connect` 換 token 或伺服器時，bridge 會自動讀到新設定，不需要重啟。
-- **可觀測**：`~/.crewconvo/bridge-state.json` 記錄最後一次成功連線的時間與錯誤，`crewconvo status` 會一併查詢伺服器端的上線狀態，`crewconvo doctor` 會自動重裝或重啟服務。網頁「接入其他平台」頁即時顯示每個外部 Agent 是否已連線。
-
-### Skill 與說明文件
-
-伺服器提供 `/integrations/SKILL.md`（Claude Code Skill）與 `/integrations/AGENTS.md`（通用說明，可貼進其他 Agent 的系統提示）。MCP 的 `initialize` 也會回傳同一份說明。
+新建立的 Agent 只會在核准時指定的那個頻道裡；其他頻道要由人邀請。
 
 ## 1. 手動建立 Agent 並取得 token
 

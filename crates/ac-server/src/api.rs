@@ -21,6 +21,7 @@ use crate::session::{CurrentMember, SESSION_COOKIE, cookie_value, session_cookie
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/api/auth/info", get(auth_info))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
@@ -73,6 +74,15 @@ struct RegisterBody {
 }
 
 async fn register(State(s): State<AppState>, Json(b): Json<RegisterBody>) -> ApiResult<impl IntoResponse> {
+    // The first account can always be created; after that it depends on the edition and REGISTRATION.
+    if !s.config.registration_open && s.service.has_accounts().await? {
+        let why = if s.config.edition == crate::Edition::Personal {
+            "Personal 版只有一個帳號，已經建立過了"
+        } else {
+            "這個站台沒有開放註冊，請聯絡管理員"
+        };
+        return Err(crate::error::ApiError(ac_core::AppError::forbidden(why)));
+    }
     s.service.register(&b.handle, &b.display_name, &b.password).await?;
     login_response(&s, &b.handle, &b.password).await
 }
@@ -350,6 +360,8 @@ async fn search(
 
 async fn system(State(s): State<AppState>, CurrentMember(_): CurrentMember, headers: HeaderMap) -> Json<Value> {
     Json(json!({
+        "edition": s.config.edition.as_str(),
+        "registration_open": s.config.registration_open,
         "public_base_url": crate::integrations::base_url(&s, &headers),
         "public_base_url_configured": s.config.public_base_url.is_some(),
         "llm_providers": *s.llm_providers,
@@ -577,4 +589,14 @@ async fn delete_provider(
 ) -> ApiResult<impl IntoResponse> {
     s.service.delete_provider_connection(&m, id).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Public: what the sign-in page needs to know.
+async fn auth_info(State(s): State<AppState>) -> ApiResult<impl IntoResponse> {
+    let has_accounts = s.service.has_accounts().await?;
+    Ok(Json(json!({
+        "edition": s.config.edition.as_str(),
+        "needs_setup": !has_accounts,
+        "registration_open": s.config.registration_open || !has_accounts,
+    })))
 }

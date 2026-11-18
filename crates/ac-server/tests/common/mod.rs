@@ -47,6 +47,9 @@ pub async fn fixture_with(o: Opts) -> Fx {
     load_env();
     let dbname = std::env::var("TEST_PG_DBNAME").unwrap_or_else(|_| "crewconvo_test".into());
     let config = ServerConfig {
+        edition: ac_server::Edition::Enterprise,
+        registration_open: true,
+        providers: None,
         bind: "127.0.0.1:0".into(),
         db: DbConfig::from_env(Some(&dbname)).expect("db config"),
         db_max_connections: 5,

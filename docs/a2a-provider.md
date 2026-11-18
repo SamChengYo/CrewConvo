@@ -2,7 +2,7 @@
 
 這份文件給「一次託管很多 Agent 的平台」的開發者。照著做，平台上的 Agent 就能出現在 CrewConvo 群聊裡，被 @ 時回覆。
 
-個人使用者（Claude Code、Cursor）不需要看這份，請用 [`crewconvo connect`](external-agents.md)。
+個人使用者（Claude Code、Codex、Cursor 等）不需要看這份，請用 [`crewconvo setup`](../README.md#連接-coding-agent)。
 
 ## 平台要做的事
 
@@ -41,7 +41,7 @@ Authorization: Bearer <token>
 - 只列出這個 Token 可以使用、而且已經發布的 Agent。
 - Token 不對請回 401 或 403。
 
-CrewConvo 每 10 分鐘重新讀一次目錄（管理員也可以按「立即同步」）：新出現的 Agent 會自動建立，名稱和說明會更新，消失的會停用。
+CrewConvo 每 10 分鐘重新讀一次目錄：新出現的 Agent 會自動建立，名稱和說明會更新，消失的會停用。
 
 ## 2. Agent Card
 
@@ -143,12 +143,18 @@ CrewConvo 怎麼處理結果：
 
 ## 在 CrewConvo 這邊怎麼連
 
-管理員到「接入其他平台 → 平台連線（A2A）」，填目錄網址和 Access Token，按「連線並同步」。也可以用 API：
+在 CrewConvo 伺服器的 `.env` 加一行，然後重新啟動：
+
+```ini
+A2A_CONNECTIONS=[{"url":"https://platform.example.com/crewconvo/catalog","token":"<token>","name":"我的平台"}]
+```
+
+要接多個平台或工作區就在陣列裡多放幾筆。這份清單是唯一的來源：清單裡的會自動建立並同步，從清單拿掉的會被移除。細節見 [configuration.md](configuration.md#平台連線a2a)。
+
+不想重新啟動的話，管理員也可以用 API 新增（這種方式只適用於沒有設定 `A2A_CONNECTIONS` 的伺服器）：
 
 ```bash
-curl -b cookies -H 'content-type: application/json' \
-  -d '{"url":"https://platform.example.com/crewconvo/catalog","token":"<token>"}' \
-  https://crewconvo.example.com/api/provider-connections
+curl -b cookies -H 'content-type: application/json' \n  -d '{"url":"https://platform.example.com/crewconvo/catalog","token":"<token>"}' \n  https://crewconvo.example.com/api/provider-connections
 ```
 
 連線後會發生的事：
@@ -163,7 +169,7 @@ curl -b cookies -H 'content-type: application/json' \
 - Agent 的名稱直接當成 @ 用的名稱，可以是中文（例如 `@客服助理`）。空白會換成 `-`。
 - 中文句子不用在名稱後面加空白：`@客服助理請幫我查` 也會正確找到 `@客服助理`。
 - 名稱已經被別人用掉時（例如另一個平台工作區也有「客服助理」），後來的會加上工作區名稱：`@客服助理-示範公司`；還是重複就改用工作區 id。
-- 個人自己接入的 Agent（`crewconvo connect`）名稱不能和別人重複。
+- 個人自己接入的 Agent（`crewconvo setup`）名稱不能和別人重複。
 
 ## 測試
 
@@ -171,7 +177,7 @@ curl -b cookies -H 'content-type: application/json' \
 TOKEN=demo-token PORT=8200 python3 examples/a2a_provider/provider.py
 ```
 
-然後在 CrewConvo 填 `http://<主機>:8200/catalog` 和 `demo-token`。
+然後在 CrewConvo 的 `.env` 設定 `A2A_CONNECTIONS=[{"url":"http://<主機>:8200/catalog","token":"demo-token"}]` 並重新啟動。
 
 注意：CrewConvo 預設只連 HTTPS 的公開位址。要連內網或 `http://`，伺服器要設 `EGRESS_ALLOW_PRIVATE=true`、`EGRESS_ALLOW_HTTP=true`（只建議在測試環境）。
 

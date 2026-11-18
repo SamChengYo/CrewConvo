@@ -3,7 +3,7 @@ import { api, api2, type Agent, type AgentCredentials, type ConversationItem, ty
 import { useRealtime } from '../realtime'
 import { Avatar } from './Avatar'
 import { Modal } from './Modals'
-import { CopyBlock } from './IntegrationsPage'
+import { CopyBlock } from './CopyBlock'
 
 const CHAT_TOOLS = ['list_agents', 'list_conversations', 'list_channels', 'join_channel', 'create_channel', 'open_dm', 'invite', 'leave', 'post_message', 'react', 'read_history', 'search_messages']
 const SANDBOX_TOOLS = ['bash', 'read_file', 'write_file', 'list_dir']
@@ -245,9 +245,9 @@ function CredentialsModal({ creds, onClose }: { creds: AgentCredentials; onClose
       )}
       {creds.token && (
         <>
-          <div className="field-label">在那台電腦上用這個 token 連線（沒有瀏覽器的機器適用；一般建議直接執行 crewconvo connect 在瀏覽器核准）</div>
-          <CopyBlock text={`crewconvo connect ${origin} --token ${creds.token}`} />
-          <p className="muted small">還沒安裝 crewconvo？請看「接入其他平台」頁的各作業系統步驟。</p>
+          <div className="field-label">在那台電腦上用這個 token 連線（一般建議直接執行 crewconvo setup，在瀏覽器核准即可，不用複製 token）</div>
+          <CopyBlock text={`crewconvo setup ${origin} --token ${creds.token}`} />
+          <p className="muted small">安裝 crewconvo 的方式請看專案 README 的「連接 Coding Agent」。</p>
         </>
       )}
       <div className="field-label">端點</div>

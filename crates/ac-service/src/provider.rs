@@ -474,3 +474,62 @@ mod tests {
         );
     }
 }
+
+impl Service {
+    /// Makes the stored platform connections match the configuration (`A2A_CONNECTIONS`):
+    /// listed ones are created or updated, others are removed. Does nothing until the first
+    /// account exists (connections belong to an admin).
+    pub async fn reconcile_providers(&self, specs: &[ConnectProviderInput]) -> AppResult<()> {
+        let store = &self.inner.store;
+        let Some(ws) = store.default_workspace().await? else { return Ok(()) };
+        let Some(admin) = store.first_admin_id(ws.id).await? else { return Ok(()) };
+        let existing = store.list_provider_connections(ws.id).await?;
+        for spec in specs {
+            let url = spec.url.trim();
+            let token = spec.token.as_deref().map(str::trim).filter(|t| !t.is_empty());
+            let name = spec.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            match existing.iter().find(|c| c.catalog_url == url) {
+                Some(c) => {
+                    let current = match &c.token_sealed {
+                        Some(s) => self.secrets().decrypt(s).ok(),
+                        None => None,
+                    };
+                    if current.as_deref() != token || name.is_some_and(|n| n != c.name) {
+                        let sealed = token.map(|t| self.secrets().encrypt(t));
+                        store.set_provider_token(c.id, sealed.as_deref(), name).await?;
+                    }
+                }
+                None => {
+                    if let Err(e) = net::check_url(url, self.egress()).await {
+                        tracing::warn!(url, error = %e, "A2A_CONNECTIONS: skipping an unusable URL");
+                        continue;
+                    }
+                    let sealed = token.map(|t| self.secrets().encrypt(t));
+                    let fallback = url.split('/').nth(2).unwrap_or("platform").to_string();
+                    let c = store
+                        .create_provider_connection(ws.id, name.unwrap_or(&fallback), url, sealed.as_deref(), admin)
+                        .await?;
+                    tracing::info!(url, "platform connection added from configuration");
+                    // A failed first sync is kept (with its error) and retried on the next tick.
+                    if let Err(e) = self.sync_provider(c.id).await {
+                        tracing::warn!(url, error = %e, "platform sync failed");
+                    }
+                }
+            }
+        }
+        for c in existing.iter().filter(|c| !specs.iter().any(|s| s.url.trim() == c.catalog_url)) {
+            tracing::info!(url = %c.catalog_url, "platform connection removed (no longer in the configuration)");
+            self.remove_provider(c.id).await?;
+        }
+        Ok(())
+    }
+
+    /// Whether any human account exists yet (first-run setup).
+    pub async fn has_accounts(&self) -> AppResult<bool> {
+        let store = &self.inner.store;
+        match store.default_workspace().await? {
+            Some(ws) => Ok(store.count_humans(ws.id).await? > 0),
+            None => Ok(false),
+        }
+    }
+}

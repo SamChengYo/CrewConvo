@@ -1,0 +1,17 @@
+# CrewConvo Personal: one container, built-in database, data in the `crewconvo-data` volume.
+#   docker compose up -d --build        →  http://localhost:8090
+services:
+  crewconvo:
+    build: .
+    restart: unless-stopped
+    environment:
+      CREWCONVO_EDITION: personal
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "127.0.0.1:8090:8090"   # only this computer; change to "8090:8090" to open it to your network
+    volumes:
+      - crewconvo-data:/data
+volumes:
+  crewconvo-data:

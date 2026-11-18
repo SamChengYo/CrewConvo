@@ -2160,3 +2160,71 @@ label.row {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- editions ---------- */
+.edition-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  vertical-align: middle;
+  background: rgba(255, 255, 255, 0.16);
+  color: inherit;
+}
+.login .edition-badge {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.login .edition-badge.enterprise {
+  background: rgba(63, 14, 64, 0.1);
+  color: var(--chrome);
+}
+
+/* ---------- connect: several coding agents ---------- */
+.connect-card.wide {
+  max-width: 720px;
+}
+.connect-agent {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 10px;
+}
+.connect-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.connect-reuse {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.connect-reuse input {
+  width: auto;
+  margin: 0;
+}
+.connect-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.connect-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+@media (max-width: 640px) {
+  .connect-two {
+    grid-template-columns: 1fr;
+  }
+}
