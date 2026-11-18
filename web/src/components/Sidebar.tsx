@@ -8,7 +8,9 @@ interface Props {
   convs: ConversationItem[]
   agents: Agent[]
   activeId: string | null
-  page: 'agents' | 'deciders' | 'activity' | 'groups' | null
+  page: 'agents' | 'deciders' | 'activity' | 'groups' | 'local' | null
+  /** Present when the server can set up the coding agents on the computer it runs on. */
+  onLocal?: () => void
   onOpen: (id: string) => void
   onOpenAgent: (agentId: string) => void
   onAgents: () => void
@@ -69,6 +71,12 @@ export default function Sidebar(p: Props) {
             <span className="sb-glyph">✦</span>
             <span className="sb-label">Agent 管理</span>
           </button>
+          {p.onLocal && (
+            <button className={`sb-item ${p.page === 'local' ? 'active' : ''}`} onClick={p.onLocal}>
+              <span className="sb-glyph">⌘</span>
+              <span className="sb-label">這台電腦的 Coding Agent</span>
+            </button>
+          )}
           <button className={`sb-item ${p.page === 'groups' ? 'active' : ''}`} onClick={p.onGroups}>
             <span className="sb-glyph">◎</span>
             <span className="sb-label">Agent 群組</span>

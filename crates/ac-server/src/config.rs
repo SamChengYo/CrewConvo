@@ -71,6 +71,11 @@ pub struct ServerConfig {
     pub sandbox: bool,
     /// Public URL other platforms use (PUBLIC_BASE_URL); None → derived from the request.
     pub public_base_url: Option<String>,
+    /// Where the built-in database, search index and generated keys live.
+    pub data_dir: PathBuf,
+    /// Offer to set up the coding agents on the computer the server runs on (`LOCAL_AGENTS`).
+    /// Default: on for the Personal edition when only this computer can reach the server.
+    pub local_agents: bool,
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
@@ -145,6 +150,9 @@ impl ServerConfig {
         let data_dir = Self::data_dir_from_env();
         // Personal: only this computer by default. Enterprise: reachable from the network.
         let default_bind = if edition == Edition::Personal { "127.0.0.1:8090" } else { "0.0.0.0:8090" };
+        let bind = std::env::var("BIND_ADDR").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| default_bind.into());
+        let loopback = ["127.", "localhost:", "[::1]:"].iter().any(|p| bind.starts_with(p));
+        let local_agents = env_flag("LOCAL_AGENTS", edition == Edition::Personal && loopback);
         let registration_open = match std::env::var("REGISTRATION").ok().map(|v| v.trim().to_ascii_lowercase()) {
             None => edition == Edition::Enterprise,
             Some(v) if v.is_empty() => edition == Edition::Enterprise,
@@ -159,10 +167,7 @@ impl ServerConfig {
             // The Personal edition has exactly one human account.
             registration_open: registration_open && edition == Edition::Enterprise,
             providers: providers_from_env()?,
-            bind: std::env::var("BIND_ADDR")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or_else(|| default_bind.into()),
+            bind,
             db,
             db_max_connections: env_parse("DB_MAX_CONNECTIONS").unwrap_or(20),
             web_dist: Some(web_dist_from_env()),
@@ -177,6 +182,8 @@ impl ServerConfig {
             egress: EgressPolicy::from_env(),
             sandbox: env_flag("SANDBOX_ENABLED", true),
             public_base_url: std::env::var("PUBLIC_BASE_URL").ok().filter(|v| !v.trim().is_empty()),
+            data_dir,
+            local_agents,
         })
     }
 }

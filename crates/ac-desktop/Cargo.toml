@@ -1,0 +1,27 @@
+[package]
+name = "ac-desktop"
+version.workspace = true
+edition.workspace = true
+description = "CrewConvo Personal as a Windows desktop app: server, built-in database and coding agent setup in one program"
+
+[[bin]]
+name = "CrewConvo"
+path = "src/main.rs"
+
+# Everything is Windows-only so the rest of the workspace still builds on Linux and macOS
+# without any desktop libraries.
+[target.'cfg(windows)'.dependencies]
+ac-server = { path = "../ac-server" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+dotenvy.workspace = true
+tao = "0.37"
+wry = "0.57"
+tray-icon = "0.26"
+include_dir = "0.7"
+winreg = "0.56"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

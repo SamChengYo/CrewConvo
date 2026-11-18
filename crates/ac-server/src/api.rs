@@ -370,6 +370,7 @@ async fn system(State(s): State<AppState>, CurrentMember(_): CurrentMember, head
         "summary_model": s.config.summary.model,
         "limits": s.service.limits(),
         "egress": { "allow_private": s.config.egress.allow_private, "allow_http": s.config.egress.allow_http },
+        "local_agents": s.local.is_some(),
         "mcp_endpoint": "/mcp",
         "agent_ws_endpoint": "/agent/v1/ws",
     }))

@@ -64,6 +64,8 @@ pub async fn fixture_with(o: Opts) -> Fx {
         egress: EgressPolicy { allow_private: true, allow_http: true },
         sandbox: false,
         public_base_url: None,
+        data_dir: std::env::temp_dir(),
+        local_agents: false,
     };
     let llm_cfg = if o.real_llm {
         LlmConfig { enable_mock: true, ..LlmConfig::from_env() }

@@ -57,6 +57,9 @@ CrewConvo 的設定全部來自環境變數。最簡單的做法是在伺服器�
 | `CREWCONVO_MASTER_KEY` | 自動產生 | 加密儲存的機密（決策模型的 API key、平台連線的 token）。32 個隨機位元組的 base64。留白時自動產生並存到 `DATA_DIR/master.key`。**弄丟這把金鑰，已儲存的機密就解不開** |
 | `SEARCH_INDEX_DIR` | `DATA_DIR/search-index` | 全文搜尋索引。刪掉後會在下次啟動時從資料庫重建 |
 | `WEB_DIST` | 自動 | 網頁檔案的位置 |
+| `LOCAL_AGENTS` | 依情況 | 是否在網頁提供「這台電腦的 Coding Agent」：由伺服器直接偵測、安裝並喚醒它所在電腦上的 Coding Agent。預設只在 Personal 版且 `BIND_ADDR` 是本機位址時開啟。連線資訊存在 `DATA_DIR/local-agents.json` |
+
+Windows 桌面應用程式（`CrewConvo.exe`）把 `DATA_DIR` 預設成 `%LOCALAPPDATA%\CrewConvo\data`，並讀取 `%LOCALAPPDATA%\CrewConvo\.env`；記錄寫在同一個資料夾的 `logs\crewconvo.log`。
 
 ## 模型（內建 Agent 用，選填）
 

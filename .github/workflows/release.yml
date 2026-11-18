@@ -33,6 +33,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the server
         run: cargo build --release --bin crewconvo-server
+      - name: Build the desktop app (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release -p ac-desktop
+          cp target/release/CrewConvo.exe CrewConvo-windows-x86_64.exe
       - name: Package
         shell: bash
         run: |
@@ -52,3 +58,4 @@ jobs:
           files: |
             crewconvo-*.zip
             crewconvo-*.tar.gz
+            CrewConvo-windows-x86_64.exe

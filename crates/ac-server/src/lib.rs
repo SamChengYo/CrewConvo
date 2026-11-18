@@ -5,8 +5,11 @@ pub mod a2a;
 pub mod agent_api;
 mod api;
 mod config;
+pub mod embedded;
 mod error;
 pub mod integrations;
+mod launch;
+pub mod local;
 pub mod longpoll;
 pub mod mcp;
 mod session;
@@ -14,6 +17,7 @@ pub mod webhook;
 mod ws;
 
 pub use config::{Edition, ProviderSpec, ServerConfig};
+pub use launch::serve_from_env;
 
 use std::sync::Arc;
 
@@ -41,6 +45,8 @@ pub struct AppState {
     pub webhooks: Arc<webhook::WebhookManager>,
     pub a2a: Arc<a2a::A2aManager>,
     pub polls: longpoll::PollHub,
+    /// Coding agents on this computer; None when the server is not running on the user's own computer.
+    pub local: Option<local::LocalAgents>,
 }
 
 pub struct App {
@@ -151,8 +157,16 @@ pub async fn build_with_sandbox(
             }
         });
     }
+    let local = config.local_agents.then(|| {
+        local::LocalAgents::new(service.clone(), &config.data_dir, local::local_url(&config.bind))
+    });
+    if config.manage_existing
+        && let Some(l) = &local
+    {
+        l.start_all();
+    }
     let state =
-        AppState { service, runtime, config: Arc::new(config), llm_providers, summarizer, webhooks, a2a, polls };
+        AppState { service, runtime, config: Arc::new(config), llm_providers, summarizer, webhooks, a2a, polls, local };
     let router = router(state.clone());
     Ok(App { state, router })
 }
@@ -166,6 +180,7 @@ fn router(state: AppState) -> Router {
         .merge(ws::routes())
         .merge(agent_api::routes())
         .merge(integrations::routes())
+        .merge(local::routes())
         .with_state(state.clone())
         .merge(mcp);
     if let Some(dir) = &state.config.web_dist

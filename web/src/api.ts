@@ -295,6 +295,8 @@ export interface SystemInfo {
   agent_ws_endpoint: string
   public_base_url: string
   public_base_url_configured: boolean
+  /** The server can set up the coding agents on the computer it runs on. */
+  local_agents?: boolean
 }
 
 export const api2 = {
@@ -404,4 +406,37 @@ export const connectApi = {
   get: (code: string) => request<ConnectRequestView>('GET', `/api/connect/${encodeURIComponent(code)}`),
   approve: (code: string, body: ConnectApproval) => request<ApproveResult>('POST', `/api/connect/${encodeURIComponent(code)}/approve`, body),
   deny: (code: string) => request<unknown>('POST', `/api/connect/${encodeURIComponent(code)}/deny`),
+}
+
+export interface LocalPlatform {
+  id: string
+  name: string
+  description: string
+  /** Found on the computer CrewConvo runs on. */
+  detected: boolean
+  /** Has a command-line program, so it can answer when mentioned. */
+  can_wake: boolean
+  note: string
+  agent: { agent_id: string; handle: string; online: boolean } | null
+}
+
+export interface LocalAgentsInfo {
+  platforms: LocalPlatform[]
+  server: string
+  default_group: string
+  default_channel: string
+}
+
+export interface LocalInstallResult {
+  results: { platform: string; name: string; handle: string; ok: boolean; lines: string[]; can_wake: boolean; note: string }[]
+  group: string | null
+  channel: { id: string; name: string } | null
+  warnings: string[]
+}
+
+export const localApi = {
+  list: () => request<LocalAgentsInfo>('GET', '/api/local-agents'),
+  install: (body: { platforms: string[]; group_name?: string; channel_name?: string }) =>
+    request<LocalInstallResult>('POST', '/api/local-agents/install', body),
+  remove: (platform: string) => request<unknown>('DELETE', `/api/local-agents/${platform}`),
 }

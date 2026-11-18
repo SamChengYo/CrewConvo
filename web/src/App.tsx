@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, api2, ApiError, type Agent, type ConversationItem, type Member } from './api'
+import { api, api2, ApiError, localApi, type Agent, type ConversationItem, type Member } from './api'
 import { realtime, useRealtime } from './realtime'
 import Login from './components/Login'
 import Sidebar from './components/Sidebar'
@@ -11,9 +11,10 @@ import SearchPanel from './components/SearchPanel'
 import ActivityPage from './components/ActivityPage'
 import ConnectPage from './components/ConnectPage'
 import GroupsPage from './components/GroupsPage'
+import LocalAgentsPage from './components/LocalAgentsPage'
 import { NewChannelModal, NewDmModal, BrowseChannelsModal } from './components/Modals'
 
-type View = { kind: 'conversation'; id: string } | { kind: 'agents' } | { kind: 'deciders' } | { kind: 'activity' } | { kind: 'groups' } | { kind: 'connect'; code: string } | { kind: 'empty' }
+type View = { kind: 'conversation'; id: string } | { kind: 'agents' } | { kind: 'deciders' } | { kind: 'activity' } | { kind: 'groups' } | { kind: 'local' } | { kind: 'connect'; code: string } | { kind: 'empty' }
 type ModalKind = 'channel' | 'dm' | 'browse' | null
 
 export default function App() {
@@ -58,9 +59,24 @@ function Workspace({ me, onLogout }: { me: Member; onLogout: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState<string | null>(null)
   const [edition, setEdition] = useState<'personal' | 'enterprise'>('enterprise')
+  const [localAgents, setLocalAgents] = useState(false)
 
   useEffect(() => {
-    api2.system().then((s) => setEdition(s.edition)).catch(() => {})
+    api2
+      .system()
+      .then((s) => {
+        setEdition(s.edition)
+        setLocalAgents(!!s.local_agents)
+        // Nothing connected yet: start on the page that sets the coding agents up.
+        if (s.local_agents)
+          localApi
+            .list()
+            .then((i) => {
+              if (i.platforms.some((p) => p.detected) && !i.platforms.some((p) => p.agent)) setView((v) => (v.kind === 'connect' ? v : { kind: 'local' }))
+            })
+            .catch(() => {})
+      })
+      .catch(() => {})
   }, [])
 
   const reload = useCallback(async () => {
@@ -158,13 +174,14 @@ function Workspace({ me, onLogout }: { me: Member; onLogout: () => void }) {
           convs={convs}
           agents={agents}
           activeId={view.kind === 'conversation' ? view.id : null}
-          page={view.kind === 'agents' || view.kind === 'deciders' || view.kind === 'activity' || view.kind === 'groups' ? view.kind : null}
+          page={view.kind === 'agents' || view.kind === 'deciders' || view.kind === 'activity' || view.kind === 'groups' || view.kind === 'local' ? view.kind : null}
           onOpen={(id) => setView({ kind: 'conversation', id })}
           onOpenAgent={openAgent}
           onAgents={() => setView({ kind: 'agents' })}
           onDeciders={() => setView({ kind: 'deciders' })}
           onActivity={() => setView({ kind: 'activity' })}
           onGroups={() => setView({ kind: 'groups' })}
+          onLocal={localAgents ? () => setView({ kind: 'local' }) : undefined}
           onNewChannel={() => setModal('channel')}
           onNewDm={() => setModal('dm')}
           onBrowse={() => setModal('browse')}
@@ -195,6 +212,7 @@ function Workspace({ me, onLogout }: { me: Member; onLogout: () => void }) {
           {view.kind === 'deciders' && <DecidersPage onError={setError} />}
           {view.kind === 'activity' && <ActivityPage onOpen={openConversation} onError={setError} />}
           {view.kind === 'groups' && <GroupsPage me={me} agents={agents} members={members} onError={setError} />}
+          {view.kind === 'local' && <LocalAgentsPage onOpen={openConversation} onError={setError} />}
           {view.kind === 'connect' && (
             <ConnectPage
               me={me}

@@ -62,7 +62,20 @@ CrewConvo 是一個像 Slack 的聊天平台，成員可以是人，也可以是
 <details>
 <summary>🪟 Windows</summary>
 
-**方式一：下載執行檔（不需要 Docker）**
+**方式一：桌面應用程式（建議）**
+
+一個檔案就是全部：伺服器、內建資料庫、網頁介面，以及「把這台電腦上的 Coding Agent 接進來」的功能。不需要 Docker、Python 或任何設定。
+
+1. 到 [Releases](https://github.com/SamChengYo/CrewConvo/releases/latest) 下載 `CrewConvo-windows-x86_64.exe`，放到你想放的位置後直接開啟。
+2. 第一次啟動會下載內建資料庫（約一分鐘），完成後視窗裡就是 CrewConvo。建立你的帳號。
+3. 畫面會帶你到「這台電腦的 Coding Agent」：勾選偵測到的 Claude Code、Codex、Cursor、OpenCode、Antigravity，按「安裝」。它會替每一個建立 Agent、寫好 MCP 與 Skill，並建立一個群組和一個頻道。
+4. 到那個頻道 `@` 它們就可以了。
+
+- 關閉視窗後，CrewConvo 會留在右下角的系統匣繼續執行，Coding Agent 才能隨時被叫起來。在系統匣圖示上按右鍵可以重新開啟、設定「開機時自動啟動」或結束。
+- 設定、資料與記錄都在 `%LOCALAPPDATA%\CrewConvo`（系統匣選單的「開啟資料夾」）。需要調整設定時，在那個資料夾放一個 `.env`，寫法和 [設定參考](docs/configuration.md) 相同。
+- 需要 Windows 10 或 11（使用系統內建的 WebView2）。檔案沒有數位簽章，第一次開啟時 Windows 可能會顯示 SmartScreen 警告，選「其他資訊 → 仍要執行」。
+
+**方式二：下載伺服器執行檔（不要視窗，只要伺服器）**
 
 1. 到 [Releases](https://github.com/SamChengYo/CrewConvo/releases/latest) 下載 `crewconvo-windows-x86_64.zip` 並解壓縮。
 2. 在解壓縮後的資料夾開啟 PowerShell，執行：
@@ -266,6 +279,17 @@ Enterprise 版可以使用 PostgreSQL 或任何相容的服務：
 啟動後打開你的網址，第一個建立的帳號就是管理員。不想讓任何人都能註冊，在 `.env` 設 `REGISTRATION=closed`。
 
 ## 連接 Coding Agent
+
+有兩種做法，看 Coding Agent 和 CrewConvo 是不是在同一台電腦：
+
+| 情況 | 做法 |
+|---|---|
+| CrewConvo（Personal 版）和 Coding Agent 在**同一台電腦** | 不用安裝任何東西。在網頁左側打開「**這台電腦的 Coding Agent**」，勾選後按「安裝」。Windows 桌面應用程式就是用這個方式 |
+| Coding Agent 在**另一台電腦**，或 CrewConvo 是 Enterprise 版 | 在那台電腦安裝 `crewconvo` 指令，照下面的步驟執行 `crewconvo setup` |
+
+「這台電腦的 Coding Agent」只在 Personal 版、而且只有本機連得到伺服器時出現（可用 `LOCAL_AGENTS=true/false` 強制開關）。它做的事和 `crewconvo setup` 相同，喚醒也由伺服器自己處理，不需要另外跑背景服務。
+
+以下說明 `crewconvo` 指令。
 
 `crewconvo` 是裝在「Coding Agent 所在的電腦」上的小工具（只需要 Python 3.8 以上，沒有其他相依套件）。它會：
 

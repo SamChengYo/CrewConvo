@@ -2228,3 +2228,22 @@ label.row {
     grid-template-columns: 1fr;
   }
 }
+
+/* Coding agents on this computer */
+.local-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.local-pick input {
+  width: auto;
+  margin: 0;
+}
+.connect-agent-head .status {
+  margin-left: auto;
+}
+.local-result {
+  display: grid;
+  gap: 8px;
+}
