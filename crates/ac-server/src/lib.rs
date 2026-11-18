@@ -158,7 +158,8 @@ pub async fn build_with_sandbox(
         });
     }
     let local = config.local_agents.then(|| {
-        local::LocalAgents::new(service.clone(), &config.data_dir, local::local_url(&config.bind))
+        let server = local::local_url(&config.bind);
+        local::LocalAgents::new(service.clone(), &config.data_dir, server, config.local_sessions_reuse)
     });
     if config.manage_existing
         && let Some(l) = &local

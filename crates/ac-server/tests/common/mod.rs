@@ -66,6 +66,9 @@ pub async fn fixture_with(o: Opts) -> Fx {
         public_base_url: None,
         data_dir: std::env::temp_dir(),
         local_agents: false,
+        local_sessions_reuse: true,
+        // Most tests post messages in a workspace without a decision model.
+        require_decider: false,
     };
     let llm_cfg = if o.real_llm {
         LlmConfig { enable_mock: true, ..LlmConfig::from_env() }

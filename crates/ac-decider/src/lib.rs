@@ -5,6 +5,7 @@
 mod decisions_api;
 mod llm_structured;
 pub mod net;
+pub mod pick;
 pub mod secret;
 
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use net::EgressPolicy;
+pub use pick::PickInput;
 pub use secret::SecretBox;
 
 /// Recent messages are truncated to this many characters each.
@@ -295,6 +297,35 @@ impl DeciderChain {
 
     fn key_of(&self, rec: &DeciderConfigRecord) -> Result<Option<String>, DeciderError> {
         rec.api_key_encrypted.as_deref().map(|e| self.secrets.decrypt(e).map_err(DeciderError::Config)).transpose()
+    }
+
+    /// Whether a config can be called at all: enabled, and with a key where the protocol needs one.
+    pub fn usable(rec: &DeciderConfigRecord) -> bool {
+        rec.config.enabled
+            && !(rec.config.protocol == DeciderProtocol::DecisionsApi && rec.api_key_encrypted.is_none())
+    }
+
+    /// Asks the first usable config a one-of-N question, once. None when there is no usable
+    /// config or the call fails — callers fall back to a rule of their own.
+    pub async fn pick(&self, configs: &[DeciderConfigRecord], input: &PickInput, cap: Duration) -> Option<String> {
+        let now = Instant::now();
+        let rec = {
+            let breaker = self.breaker.lock().unwrap();
+            let mut ordered: Vec<&DeciderConfigRecord> = configs.iter().filter(|c| Self::usable(c)).collect();
+            ordered.sort_by_key(|c| c.config.priority);
+            ordered.into_iter().find(|c| breaker.get(&c.config.id).is_none_or(|until| now >= *until))?
+        };
+        let cx = CallContext { config: &rec.config, api_key: self.key_of(rec).ok()?, policy: self.policy };
+        match pick::call(&cx, input, cap).await {
+            Ok(key) => Some(key),
+            Err(err) => {
+                if matches!(err, DeciderError::RateLimited(_)) {
+                    self.breaker.lock().unwrap().insert(rec.config.id, Instant::now() + BREAKER);
+                }
+                tracing::warn!(config = %rec.config.name, error = %err, "decider pick failed");
+                None
+            }
+        }
     }
 
     /// Calls a single config regardless of order / breaker (test button, evaluation).

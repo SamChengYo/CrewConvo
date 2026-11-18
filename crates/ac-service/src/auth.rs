@@ -103,3 +103,35 @@ impl Service {
         self.inner.store.delete_session(&hash_token(token)).await
     }
 }
+
+impl Service {
+    /// Signs a person up with an e-mail address, a name and a password. The name is both what
+    /// others see and what they type after `@` (spaces become `-`), so it must be unique.
+    pub async fn register_account(&self, email: &str, name: &str, password: &str) -> AppResult<Member> {
+        let email = email.trim();
+        let parts: Vec<&str> = email.split("@").collect();
+        let valid = parts.len() == 2
+            && !parts[0].is_empty()
+            && parts[1].contains(".")
+            && !email.chars().any(char::is_whitespace)
+            && email.len() <= 254;
+        if !valid {
+            return Err(AppError::bad_request("請輸入有效的電子信箱"));
+        }
+        let name = name.trim();
+        let handle = ac_core::mention::handle_from_name(name)
+            .ok_or_else(|| AppError::bad_request("名字需要 1 到 32 個字，可以用中文、英文與數字"))?;
+        let store = &self.inner.store;
+        if store.email_taken(email).await? {
+            return Err(AppError::Conflict("這個信箱已經註冊過了，請直接登入".into()));
+        }
+        if let Some(ws) = store.default_workspace().await?
+            && store.member_by_handle(ws.id, &handle).await?.is_some()
+        {
+            return Err(AppError::Conflict(format!("「{name}」這個名字已經有人使用，請換一個")));
+        }
+        let member = self.register(&handle, name, password).await?;
+        store.set_human_email(member.id, email).await?;
+        Ok(member)
+    }
+}

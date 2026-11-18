@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api2, type DeciderConfig, type DeciderTestResult } from '../api'
 
 const PROTOCOLS = {
@@ -8,13 +8,30 @@ const PROTOCOLS = {
 
 type Protocol = keyof typeof PROTOCOLS
 
-export default function DecidersPage({ onError }: { onError: (m: string) => void }) {
+interface Props {
+  onError: (m: string) => void
+  /** Inside the first-run setup screen: no page chrome, the caller explains what this is. */
+  embedded?: boolean
+  /** Called after the list was (re)loaded, so the caller can check whether a usable one exists. */
+  onChanged?: () => void
+}
+
+export default function DecidersPage({ onError, embedded, onChanged }: Props) {
   const [configs, setConfigs] = useState<DeciderConfig[]>([])
   const [editing, setEditing] = useState<DeciderConfig | 'new' | null>(null)
   const [tests, setTests] = useState<Record<string, DeciderTestResult | 'running'>>({})
+  // Kept in a ref: a caller passing a new function each render must not restart the loading.
+  const changed = useRef(onChanged)
+  changed.current = onChanged
 
   const reload = useCallback(() => {
-    api2.deciders().then(setConfigs).catch((e) => onError(String(e)))
+    api2
+      .deciders()
+      .then((list) => {
+        setConfigs(list)
+        changed.current?.()
+      })
+      .catch((e) => onError(String(e)))
   }, [onError])
   useEffect(reload, [reload])
 
@@ -48,15 +65,17 @@ export default function DecidersPage({ onError }: { onError: (m: string) => void
   }
 
   return (
-    <div className="page">
+    <div className={embedded ? 'deciders-embedded' : 'page'}>
       <header className="page-head">
         <div>
-          <h1>決策模型設定</h1>
+          {!embedded && <h1>決策模型設定</h1>}
           <p className="muted">
-            沒有被 tag 的人類訊息由決策模型判斷要喚醒誰。依順序嘗試，前一個逾時或失敗就換下一個；全部失敗時不喚醒任何人，訊息照常送出。變更立即生效。
+            {embedded
+              ? '依順序嘗試，前一個逾時或失敗就換下一個。按「編輯」填入 API 金鑰，或按「新增設定」加入別的模型；儲存後可以按「測試」確認連得上。'
+              : '沒有被 tag 的人類訊息由決策模型判斷要喚醒誰。依順序嘗試，前一個逾時或失敗就換下一個；全部失敗時不喚醒任何人，訊息照常送出。變更立即生效。'}
           </p>
         </div>
-        <button className="primary" onClick={() => setEditing('new')}>
+        <button className={embedded ? 'ghost' : 'primary'} onClick={() => setEditing('new')}>
           ＋ 新增設定
         </button>
       </header>
@@ -123,7 +142,11 @@ export default function DecidersPage({ onError }: { onError: (m: string) => void
             </div>
           )
         })}
-        {configs.length === 0 && <div className="empty-hint">沒有任何設定：決策模型停用，只靠規則（tag、私訊、thread）喚醒。</div>}
+        {configs.length === 0 && (
+          <div className="empty-hint">
+            {embedded ? '還沒有任何設定。按「新增設定」加入一個決策模型。' : '沒有任何設定：決策模型停用，只靠規則（tag、私訊、thread）喚醒。'}
+          </div>
+        )}
       </div>
       {editing && (
         <DeciderForm

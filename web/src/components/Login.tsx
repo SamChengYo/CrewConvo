@@ -4,8 +4,8 @@ import { api, authInfo, type AuthInfo, type Member } from '../api'
 export default function Login({ onLoggedIn }: { onLoggedIn: (m: Member) => void }) {
   const [info, setInfo] = useState<AuthInfo | null>(null)
   const [mode, setMode] = useState<'login' | 'register'>('login')
-  const [handle, setHandle] = useState('')
-  const [displayName, setDisplayName] = useState('')
+  const [email, setEmail] = useState('')
+  const [name, setName] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -26,7 +26,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: (m: Member) => void 
     setError(null)
     try {
       const m =
-        mode === 'login' ? await api.login(handle, password) : await api.register(handle, displayName, password)
+        mode === 'login' ? await api.login(email, password) : await api.register(email, name, password)
       onLoggedIn(m)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -59,13 +59,19 @@ export default function Login({ onLoggedIn }: { onLoggedIn: (m: Member) => void 
           <p className="pill-note">終端機上的 crewconvo 正在等待核准：登入後就會看到核准畫面。</p>
         )}
         <label>
-          {mode === 'register' ? '帳號名稱（登入與被 @ 時使用，不能有空白）' : '帳號名稱'}
-          <input value={handle} onChange={(e) => setHandle(e.target.value)} autoFocus autoComplete="username" />
+          {mode === 'register' ? '信箱' : '信箱（舊帳號請填名稱）'}
+          <input
+            type={mode === 'register' ? 'email' : 'text'}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoFocus
+            autoComplete="username"
+          />
         </label>
         {mode === 'register' && (
           <label>
-            顯示名稱
-            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+            名字（其他人看到的名稱，也用來 @ 你）
+            <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
           </label>
         )}
         <label>
@@ -78,7 +84,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: (m: Member) => void 
           />
         </label>
         {error && <div className="form-error">{error}</div>}
-        <button className="primary" disabled={busy || !handle || !password}>
+        <button className="primary" disabled={busy || !email || !password || (mode === 'register' && !name.trim())}>
           {mode === 'login' ? '登入' : setup ? '建立帳號並開始' : '建立帳號'}
         </button>
         {!setup && info.registration_open && (

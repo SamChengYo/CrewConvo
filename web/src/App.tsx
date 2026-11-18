@@ -7,6 +7,7 @@ import TopBar from './components/TopBar'
 import ConversationView from './components/ConversationView'
 import AgentsPage from './components/AgentsPage'
 import DecidersPage from './components/DecidersPage'
+import DeciderSetup from './components/DeciderSetup'
 import SearchPanel from './components/SearchPanel'
 import ActivityPage from './components/ActivityPage'
 import ConnectPage from './components/ConnectPage'
@@ -27,7 +28,42 @@ export default function App() {
 
   if (me === undefined) return <div className="splash">載入中…</div>
   if (me === null) return <Login onLoggedIn={setMe} />
-  return <Workspace me={me} onLogout={loggedOut} />
+  return <Gate me={me} onLogout={loggedOut} />
+}
+
+/** Nothing of the app (the /connect approval page included) is shown until a decision model exists. */
+function Gate({ me, onLogout }: { me: Member; onLogout: () => void }) {
+  const [stage, setStage] = useState<'loading' | 'setup' | 'app'>('loading')
+  const [ready, setReady] = useState(false)
+
+  const check = useCallback(() => {
+    api2
+      .system()
+      .then((s) => {
+        // Servers that do not report it do not require one.
+        const ok = s.decider_ready !== false
+        setReady(ok)
+        // Once in the setup screen, entering the app is the user's click: they may want to test first.
+        // An admin stays there until that click; anyone else is only waiting and goes straight in.
+        setStage((st) => (ok ? (st === 'loading' || !me.is_admin ? 'app' : st) : 'setup'))
+      })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 401) onLogout()
+        // Unknown: do not lock the user out here; the server still refuses posts without one.
+        else setStage((st) => (st === 'loading' ? 'app' : st))
+      })
+  }, [me.is_admin, onLogout])
+
+  useEffect(check, [check])
+
+  const logout = async () => {
+    await api.logout().catch(() => {})
+    onLogout()
+  }
+
+  if (stage === 'loading') return <div className="splash">載入中…</div>
+  if (stage === 'setup') return <DeciderSetup me={me} ready={ready} onChanged={check} onContinue={() => setStage('app')} onLogout={logout} />
+  return <Workspace me={me} onLogout={onLogout} onDecidersChanged={check} />
 }
 
 function storageGet(key: string): string | null {
@@ -46,7 +82,7 @@ function storageSet(key: string, value: string) {
   }
 }
 
-function Workspace({ me, onLogout }: { me: Member; onLogout: () => void }) {
+function Workspace({ me, onLogout, onDecidersChanged }: { me: Member; onLogout: () => void; onDecidersChanged: () => void }) {
   const [convs, setConvs] = useState<ConversationItem[]>([])
   const [members, setMembers] = useState<Member[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
@@ -209,7 +245,7 @@ function Workspace({ me, onLogout }: { me: Member; onLogout: () => void }) {
             />
           )}
           {view.kind === 'agents' && <AgentsPage me={me} convs={convs} onError={setError} onOpenDm={openConversation} />}
-          {view.kind === 'deciders' && <DecidersPage onError={setError} />}
+          {view.kind === 'deciders' && <DecidersPage onError={setError} onChanged={onDecidersChanged} />}
           {view.kind === 'activity' && <ActivityPage onOpen={openConversation} onError={setError} />}
           {view.kind === 'groups' && <GroupsPage me={me} agents={agents} members={members} onError={setError} />}
           {view.kind === 'local' && <LocalAgentsPage onOpen={openConversation} onError={setError} />}

@@ -2247,3 +2247,96 @@ label.row {
   display: grid;
   gap: 8px;
 }
+.local-role {
+  display: grid;
+  gap: 8px;
+}
+.local-role textarea {
+  resize: vertical;
+}
+.local-role-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.local-role-row .connect-field {
+  flex: 1;
+}
+.local-sessions summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.local-session {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.local-sessions summary + .local-session {
+  margin-top: 8px;
+}
+.local-session-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* First run: nothing else is shown until a decision model exists */
+.setup-screen {
+  height: 100%;
+  overflow-y: auto;
+  padding: 32px 20px;
+  background: var(--chrome);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.setup-card {
+  width: 100%;
+  max-width: 860px;
+  /* Long lines inside (endpoint URLs) must wrap, not widen the card. */
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px 28px;
+  display: grid;
+  gap: 14px;
+}
+.setup-card p {
+  margin: 0;
+  line-height: 1.6;
+}
+.setup-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.setup-head h1 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 900;
+}
+.setup-step {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.setup-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.deciders-embedded .page-head {
+  align-items: center;
+}
+.deciders-embedded .page-head p {
+  font-size: 13px;
+}

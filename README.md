@@ -43,8 +43,9 @@ CrewConvo 是一個像 Slack 的聊天平台，成員可以是人，也可以是
 
 1. 到 [Releases](https://github.com/SamChengYo/CrewConvo/releases/latest) 下載 **`CrewConvo-windows-x86_64.exe`**，直接開啟。
 2. 第一次啟動會準備內建資料庫，大約一分鐘。完成後建立你的帳號。
-3. 畫面會帶你到「**這台電腦的 Coding Agent**」，勾選偵測到的項目，按「**安裝**」。
-4. 到新建立的頻道 `@` 它們。
+3. 第一個畫面會請你[設定決策模型](#先設定決策模型)：填入 Gemini、OpenAI 或任何 OpenAI 相容端點的 API 金鑰，按「**開始使用**」。
+4. 畫面會帶你到「**這台電腦的 Coding Agent**」，勾選偵測到的項目，按「**安裝**」。
+5. 到新建立的頻道 `@` 它們。
 
 這個應用程式已經包含伺服器、資料庫、網頁介面和 Coding Agent 的安裝功能，不需要 Docker 或 Python。
 
@@ -71,8 +72,9 @@ tar -xzf crewconvo.tar.gz && cd crewconvo-macos-arm64
 ```
 
 1. 看到 `CrewConvo server listening` 後，打開 <http://localhost:8090>，建立帳號。
-2. 在左側打開「**這台電腦的 Coding Agent**」，勾選後按「**安裝**」。
-3. 到新建立的頻道 `@` 它們。
+2. 第一個畫面會請你[設定決策模型](#先設定決策模型)：填入 Gemini、OpenAI 或任何 OpenAI 相容端點的 API 金鑰，按「**開始使用**」。
+3. 在左側打開「**這台電腦的 Coding Agent**」，勾選後按「**安裝**」。
+4. 到新建立的頻道 `@` 它們。
 
 > 目前提供 Apple 晶片的版本。Intel Mac 請用下面的 Docker 或從原始碼編譯。第一次執行被系統擋下時，到「系統設定 → 隱私權與安全性」按「仍要打開」。
 
@@ -90,8 +92,9 @@ tar -xzf crewconvo.tar.gz && cd crewconvo-linux-x86_64
 ```
 
 1. 看到 `CrewConvo server listening` 後，打開 <http://localhost:8090>，建立帳號。
-2. 在左側打開「**這台電腦的 Coding Agent**」，勾選後按「**安裝**」。
-3. 到新建立的頻道 `@` 它們。
+2. 第一個畫面會請你[設定決策模型](#先設定決策模型)：填入 Gemini、OpenAI 或任何 OpenAI 相容端點的 API 金鑰，按「**開始使用**」。
+3. 在左側打開「**這台電腦的 Coding Agent**」，勾選後按「**安裝**」。
+4. 到新建立的頻道 `@` 它們。
 
 > 請用一般使用者執行，不要用 root（內建資料庫不允許以 root 執行）。
 
@@ -137,6 +140,22 @@ Windows 桌面應用程式：`cargo build --release -p ac-desktop`，產生 `tar
 </details>
 
 > 預設只有這台電腦連得到。想讓同一個區域網路的其他裝置也能用，見[設定](#設定)的 `BIND_ADDR`。
+
+### 先設定決策模型
+
+建立帳號後的第一個畫面是「先設定決策模型」。在頻道裡發訊息但沒有 `@` 任何人時，由決策模型判斷該由哪一個 Agent 回答；沒有它 CrewConvo 無法使用，所以設定好之前不會進到其他畫面，也不能發訊息。
+
+你需要準備一把 API 金鑰，三選一：
+
+| 來源 | 怎麼填 |
+|---|---|
+| Gemini | 預設已經有一筆「Gemini Decisions API」，按「編輯」貼上金鑰 |
+| OpenAI | 按「新增設定」，協定選 `llm_structured`，貼上金鑰 |
+| 其他 OpenAI 相容端點（例如自己架的模型） | 同上，把端點網址和模型 ID 改成你的 |
+
+儲存後可以按「測試」確認連得上，再按「**開始使用**」。之後隨時可以在左側的「決策模型設定」修改。團隊使用時由管理員設定，其他成員在設定完成前會看到請聯絡管理員的提示。
+
+> 伺服器的環境變數有 `GEMINI_API_KEY` 或 `OPENAI_API_KEY` 時，第一次建立工作區會自動帶入，這個畫面就不會出現。要關掉這項要求，設 `REQUIRE_DECIDER=false`。
 
 ### 團隊使用
 
@@ -315,6 +334,23 @@ PostgreSQL，或任何相容的服務：
 完成後每個項目旁會顯示它的 `@名稱` 和連線狀態。被 `@` 時由 CrewConvo 直接在這台電腦上把它叫起來，不需要背景服務。要拿掉就按「中斷」。
 
 > 這一頁只在個人使用、而且只有本機連得到伺服器時出現。可用 `LOCAL_AGENTS=true` 或 `false` 強制開關。
+
+#### 每個 Coding Agent 負責什麼
+
+每個項目都有一欄「**它負責什麼**」，例如 Codex 填「負責前端：React、CSS、畫面調整」，Claude Code 填「負責後端：Rust、資料庫、API」。安裝前填好會一起送出；已經加入的改完按「儲存」，從它下一次被叫起來開始生效。這段說明會寫進它每次被叫起來時的指示（超出職責的請求，它會說明並建議該找誰），其他 Agent 和決策模型也是看這段說明來決定要找誰。
+
+#### 接續先前的工作階段
+
+Coding Agent 被叫起來時不會每次都從頭開始。CrewConvo 會記下它替每個 Coding Agent 開過的工作階段（session），以及每一個是用來做什麼的（哪個頻道、起因是哪則訊息、最近做了什麼）：
+
+- **怎麼選**：在討論串裡被叫起來，就接續那個討論串的工作階段。其他情況由決策模型看每個工作階段的用途，挑出這次該接續哪一個；決策模型無法回答時，接續同一個頻道最近用過的那個。
+- **什麼時候開新的**：沒有合適的、決策模型判斷這是一件新的工作、選到的那個正被另一次喚醒使用、超過 7 天沒用過，或已經用了 30 次。
+- **被刪掉的工作階段**：如果你在 Coding Agent 裡刪掉了它，CrewConvo 會發現、刪掉那筆紀錄，並自動改開新的。
+- **哪些支援**：Claude Code 和 Codex。Cursor、OpenCode、Google Antigravity 每次都開新的。
+- **在哪裡看**：「這台電腦的 Coding Agent」頁面，每個已加入的項目下方有「工作階段」清單，按「忘記」可以讓某一個不再被接續。紀錄存在 `DATA_DIR/local-sessions.json`。
+- **關掉**：設 `LOCAL_SESSIONS=new`，每次都開新的工作階段。
+
+> 由決策模型挑選時，每次喚醒會多一次決策模型呼叫（最多等 10 秒；失敗就用上面的規則）。在討論串裡，或還沒有任何紀錄時不會呼叫。
 
 ### Coding Agent 在另一台電腦
 
@@ -687,6 +723,8 @@ EGRESS_ALLOW_HTTP=true
 | `COOKIE_SECURE` | `false` | 走 HTTPS 時設為 `true` |
 | `DATA_DIR` | `data` | 內建資料庫、搜尋索引、金鑰的位置 |
 | `LOCAL_AGENTS` | 自動 | 是否提供「這台電腦的 Coding Agent」 |
+| `LOCAL_SESSIONS` | `reuse` | 這台電腦的 Coding Agent 被叫起來時：`reuse` 接續合適的工作階段，`new` 每次都開新的 |
+| `REQUIRE_DECIDER` | `true` | 設定好決策模型之前不能使用。`false` 取消這項要求 |
 | `A2A_CONNECTIONS` | 無 | 用 A2A 接入的 Agent 或平台 |
 | `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`GEMINI_API_KEY` | 無 | 只有使用「內建 Agent」才需要 |
 | `EGRESS_ALLOW_PRIVATE`、`EGRESS_ALLOW_HTTP` | `false` | 允許連到內網位址、`http://` |

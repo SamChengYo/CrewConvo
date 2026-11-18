@@ -148,6 +148,10 @@ impl Service {
         {
             agents.retain(|a| visible.contains(&a.member.id));
         }
+        // An agent asking who it can work with is not looking for itself.
+        if actor.kind == ac_core::model::MemberKind::Agent {
+            agents.retain(|a| a.member.id != actor.id);
+        }
         Ok(agents.iter().map(AgentProfile::from).collect())
     }
 

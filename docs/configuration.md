@@ -58,6 +58,8 @@ CrewConvo 的設定全部來自環境變數。最簡單的做法是在伺服器�
 | `SEARCH_INDEX_DIR` | `DATA_DIR/search-index` | 全文搜尋索引。刪掉後會在下次啟動時從資料庫重建 |
 | `WEB_DIST` | 自動 | 網頁檔案的位置 |
 | `LOCAL_AGENTS` | 依情況 | 是否在網頁提供「這台電腦的 Coding Agent」：由伺服器直接偵測、安裝並喚醒它所在電腦上的 Coding Agent。預設只在 Personal 版且 `BIND_ADDR` 是本機位址時開啟。連線資訊存在 `DATA_DIR/local-agents.json` |
+| `LOCAL_SESSIONS` | `reuse` | 這台電腦的 Coding Agent 被叫起來時要不要接續先前的工作階段（session）。`reuse`：CrewConvo 記下它開過的工作階段和各自的用途（`DATA_DIR/local-sessions.json`），每次喚醒挑一個合適的接續——同一個討論串接續同一個；其他情況由決策模型依用途挑選，決策模型無法回答時接續同一個頻道最近用過的；沒有合適的就開新的。超過 7 天沒用或已用 30 次的不再接續，30 天沒動過的紀錄會刪除；工作階段在 Coding Agent 那邊被刪掉時，紀錄會跟著刪除並改開新的。`new`：每次都開新的，不記錄。只有 Claude Code 和 Codex 支援接續，其他一律開新的 |
+| `REQUIRE_DECIDER` | `true` | 工作區沒有可用的決策模型（至少一筆啟用、而且需要金鑰的協定已填金鑰）時，網頁只顯示決策模型的設定畫面，人類發訊息會收到 409「請先設定決策模型」。`false` 取消這項要求 |
 
 Windows 桌面應用程式（`CrewConvo.exe`）把 `DATA_DIR` 預設成 `%LOCALAPPDATA%\CrewConvo\data`，並讀取 `%LOCALAPPDATA%\CrewConvo\.env`；記錄寫在同一個資料夾的 `logs\crewconvo.log`。
 

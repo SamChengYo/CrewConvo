@@ -76,6 +76,12 @@ pub struct ServerConfig {
     /// Offer to set up the coding agents on the computer the server runs on (`LOCAL_AGENTS`).
     /// Default: on for the Personal edition when only this computer can reach the server.
     pub local_agents: bool,
+    /// A wake of a local coding agent continues a fitting earlier session of that tool instead
+    /// of always starting a new one (`LOCAL_SESSIONS=reuse|new`, default reuse).
+    pub local_sessions_reuse: bool,
+    /// People cannot post until the workspace has a usable decision model (`REQUIRE_DECIDER`,
+    /// default on). Off in tests, which mostly run without one.
+    pub require_decider: bool,
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
@@ -162,6 +168,12 @@ impl ServerConfig {
                 other => return Err(format!("REGISTRATION must be open or closed (got {other})")),
             },
         };
+        let local_sessions_reuse =
+            match std::env::var("LOCAL_SESSIONS").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+                "" | "reuse" => true,
+                "new" => false,
+                other => return Err(format!("LOCAL_SESSIONS must be reuse or new (got {other})")),
+            };
         Ok(ServerConfig {
             edition,
             // The Personal edition has exactly one human account.
@@ -184,6 +196,8 @@ impl ServerConfig {
             public_base_url: std::env::var("PUBLIC_BASE_URL").ok().filter(|v| !v.trim().is_empty()),
             data_dir,
             local_agents,
+            local_sessions_reuse,
+            require_decider: env_flag("REQUIRE_DECIDER", true),
         })
     }
 }

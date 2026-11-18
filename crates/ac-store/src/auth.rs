@@ -33,7 +33,7 @@ impl Store {
         let sql = format!(
             "SELECT {MEMBER_COLS}, hc.password_hash FROM members m \
              JOIN human_credentials hc ON hc.member_id = m.id \
-             WHERE m.workspace_id = $1 AND lower(m.handle) = lower($2) AND m.deactivated_at IS NULL"
+             WHERE m.workspace_id = $1 AND (lower(m.handle) = lower($2) OR lower(hc.email) = lower($2)) \n             AND m.deactivated_at IS NULL"
         );
         #[derive(sqlx::FromRow)]
         struct Row {
@@ -73,5 +73,27 @@ impl Store {
     pub async fn delete_session(&self, token_hash: &str) -> AppResult<()> {
         sqlx::query("DELETE FROM sessions WHERE token_hash = $1").bind(token_hash).execute(&self.pool).await.db()?;
         Ok(())
+    }
+}
+
+impl Store {
+    pub async fn set_human_email(&self, member_id: Uuid, email: &str) -> AppResult<()> {
+        sqlx::query("UPDATE human_credentials SET email = $2 WHERE member_id = $1")
+            .bind(member_id)
+            .bind(email)
+            .execute(&self.pool)
+            .await
+            .db()?;
+        Ok(())
+    }
+
+    pub async fn email_taken(&self, email: &str) -> AppResult<bool> {
+        let row: Option<(Uuid,)> =
+            sqlx::query_as("SELECT member_id FROM human_credentials WHERE lower(email) = lower($1)")
+                .bind(email)
+                .fetch_optional(&self.pool)
+                .await
+                .db()?;
+        Ok(row.is_some())
     }
 }

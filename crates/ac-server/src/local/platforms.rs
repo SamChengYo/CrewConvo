@@ -20,6 +20,69 @@ pub struct Invocation {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub stdin: Option<String>,
+    /// Standard output is a stream of JSON events (Codex `--json`), not the agent's final text.
+    pub json_events: bool,
+}
+
+/// Which session of the tool a wake runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionArg<'a> {
+    /// A new session nobody will continue (the tool has no way to, or reuse is turned off).
+    Unrecorded,
+    /// A new session to be recorded. Claude Code takes the id we choose; Codex makes its own
+    /// and reports it in its event stream.
+    New(&'a str),
+    /// Continue this session.
+    Resume(&'a str),
+}
+
+/// What a Codex `--json` run printed: the session it ran in and the agent's last message.
+#[derive(Debug, Default, PartialEq)]
+pub struct CodexEvents {
+    pub thread_id: Option<String>,
+    pub last_message: Option<String>,
+    pub errors: Vec<String>,
+}
+
+/// Reads `codex exec --json` output: `thread.started` carries the session id, each
+/// `item.completed` of type `agent_message` a message of the agent. Other lines are ignored.
+pub fn codex_events(stdout: &str) -> CodexEvents {
+    let mut out = CodexEvents::default();
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
+        match v["type"].as_str().unwrap_or_default() {
+            "thread.started" => {
+                if let Some(id) = v["thread_id"].as_str() {
+                    out.thread_id = Some(id.to_string());
+                }
+            }
+            "item.completed" if v["item"]["type"] == "agent_message" => {
+                if let Some(text) = v["item"]["text"].as_str() {
+                    out.last_message = Some(text.to_string());
+                }
+            }
+            "error" | "turn.failed" => {
+                let msg = v["message"].as_str().or_else(|| v["error"]["message"].as_str());
+                if let Some(m) = msg {
+                    out.errors.push(m.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether a failed run failed because the session it was asked to continue no longer exists
+/// (the user deleted it, or the tool cleaned it up). Claude Code prints
+/// "No conversation found with session ID: <id>", Codex "no rollout found for thread id <id>".
+pub fn session_missing(output: &str) -> bool {
+    let t = output.to_lowercase();
+    let about = ["session", "conversation", "thread", "rollout"].iter().any(|w| t.contains(w));
+    let gone = ["not found", "no conversation found", "no rollout found", "no session found", "does not exist"]
+        .iter()
+        .any(|w| t.contains(w));
+    about && gone
 }
 
 pub struct Outcome {
@@ -91,6 +154,80 @@ pub fn which(names: &[&str]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The Claude Code command-line program: `claude` on PATH, or the copy that ships inside the
+/// Claude desktop app on Windows (`%LOCALAPPDATA%\Claude-Data\<id>\claude-code\<version>\<build>\claude.exe`).
+pub fn claude_exe() -> Option<PathBuf> {
+    if let Some(p) = which(&["claude"]) {
+        return Some(p);
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    let subdirs = |dir: PathBuf| -> Vec<PathBuf> {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
+    };
+    let mut found: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for profile in subdirs(env_path("LOCALAPPDATA")?.join("Claude-Data")) {
+        for version in subdirs(profile.join("claude-code")) {
+            for build in subdirs(version) {
+                let exe = build.join("claude.exe");
+                if let Ok(modified) = exe.metadata().and_then(|m| m.modified()) {
+                    found.push((modified, exe));
+                }
+            }
+        }
+    }
+    // Several versions can be present; the newest one is the one the app uses.
+    found.into_iter().max_by_key(|(t, _)| *t).map(|(_, p)| p)
+}
+
+fn child_dirs(dir: PathBuf) -> Vec<PathBuf> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
+}
+
+fn newest(files: Vec<PathBuf>) -> Option<PathBuf> {
+    files
+        .into_iter()
+        .filter_map(|p| p.metadata().and_then(|m| m.modified()).ok().map(|t| (t, p)))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
+}
+
+/// The Codex command-line program: `codex` on PATH, or the copy inside the Codex desktop app
+/// (`%LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe`) or the Codex extension for VS Code.
+pub fn codex_exe() -> Option<PathBuf> {
+    if let Some(p) = which(&["codex"]) {
+        return Some(p);
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    let mut files = Vec::new();
+    if let Some(local) = env_path("LOCALAPPDATA") {
+        for build in child_dirs(local.join("OpenAI").join("Codex").join("bin")) {
+            files.push(build.join("codex.exe"));
+        }
+    }
+    if let Some(found) = newest(files) {
+        return Some(found);
+    }
+    let mut files = Vec::new();
+    for ext in child_dirs(home().join(".vscode").join("extensions")) {
+        let is_codex = ext.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("openai.chatgpt-"));
+        if is_codex {
+            files.push(ext.join("bin").join("windows-x86_64").join("codex.exe"));
+        }
+    }
+    newest(files)
+}
+
+/// Whether the Claude Code CLI is signed in; None when that cannot be determined.
+fn claude_logged_in(exe: &Path) -> Option<bool> {
+    let out = quiet_command(exe).args(["auth", "status"]).output().ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    v.get("loggedIn")?.as_bool()
 }
 
 /// A command that never opens a console window (the desktop app has none of its own).
@@ -334,6 +471,20 @@ impl Platform {
         }
     }
 
+    /// What the user still has to do before this one answers when mentioned (checked now).
+    pub fn status_note(self) -> String {
+        if self == Platform::ClaudeCode
+            && let Some(exe) = claude_exe()
+            && claude_logged_in(&exe) == Some(false)
+        {
+            return format!(
+                "指令列版的 Claude Code 還沒有登入，所以被 @ 時無法回覆。在終端機執行「{}」，輸入 /login 登入一次即可",
+                exe.display()
+            );
+        }
+        self.wake_note().to_string()
+    }
+
     /// What has to be true before this one can be woken, when that is not obvious.
     pub fn wake_note(self) -> &'static str {
         match self {
@@ -362,8 +513,8 @@ impl Platform {
 
     pub fn detect(self) -> bool {
         match self {
-            Platform::ClaudeCode => which(&["claude"]).is_some(),
-            Platform::Codex => which(&["codex"]).is_some() || Self::codex_dir().exists(),
+            Platform::ClaudeCode => claude_exe().is_some(),
+            Platform::Codex => codex_exe().is_some() || Self::codex_dir().exists(),
             Platform::Cursor => home().join(".cursor").exists() || which(&["cursor", "cursor-agent"]).is_some(),
             Platform::OpenCode => which(&["opencode"]).is_some() || Self::opencode_dir().exists(),
             Platform::Antigravity => {
@@ -387,8 +538,8 @@ impl Platform {
     /// The command-line program that can run it without a window, if there is one.
     pub fn runner(self) -> Option<PathBuf> {
         match self {
-            Platform::ClaudeCode => which(&["claude"]),
-            Platform::Codex => which(&["codex"]),
+            Platform::ClaudeCode => claude_exe(),
+            Platform::Codex => codex_exe(),
             Platform::Cursor => which(&["cursor-agent"]).or_else(|| {
                 // The CLI is now called `agent`; only trust that generic name when Cursor is installed.
                 if home().join(".cursor").exists() { which(&["agent"]) } else { None }
@@ -403,7 +554,7 @@ impl Platform {
         let url = format!("{server}/mcp");
         match self {
             Platform::ClaudeCode => {
-                let Some(exe) = which(&["claude"]) else {
+                let Some(exe) = claude_exe() else {
                     return Outcome::fail("找不到 claude 指令".into());
                 };
                 let _ = run(&exe, &["mcp", "remove", MCP_NAME, "-s", "user"]);
@@ -519,7 +670,7 @@ impl Platform {
     pub fn uninstall(self) {
         match self {
             Platform::ClaudeCode => {
-                if let Some(exe) = which(&["claude"]) {
+                if let Some(exe) = claude_exe() {
                     let _ = run(&exe, &["mcp", "remove", MCP_NAME, "-s", "user"]);
                 }
                 remove_skill(&home().join(".claude").join("skills"));
@@ -557,8 +708,14 @@ impl Platform {
         }
     }
 
+    /// Whether a later wake can continue a session of this tool. Only the tools whose flags
+    /// for it have been checked; the others always start a new session.
+    pub fn keeps_sessions(self) -> bool {
+        matches!(self, Platform::ClaudeCode | Platform::Codex)
+    }
+
     /// How to run one wake. `tools` are the MCP tool names this agent may use.
-    pub fn invocation(self, prompt: &str, tools: &[String]) -> Option<Invocation> {
+    pub fn invocation(self, prompt: &str, tools: &[String], session: SessionArg<'_>) -> Option<Invocation> {
         let program = self.runner()?;
         // Windows passes arguments to .cmd launchers through cmd.exe, which cannot carry line breaks.
         let is_script = program
@@ -576,15 +733,30 @@ impl Platform {
                 } else {
                     tools.iter().map(|t| format!("mcp__{MCP_NAME}__{t}")).collect::<Vec<_>>().join(",")
                 };
-                (s(&["-p", "--allowedTools", &allowed, "--output-format", "text"]), Some(prompt.to_string()))
+                let mut args = s(&["-p", "--allowedTools", &allowed, "--output-format", "text"]);
+                match session {
+                    SessionArg::Unrecorded => {}
+                    SessionArg::New(id) => args.extend(s(&["--session-id", id])),
+                    SessionArg::Resume(id) => args.extend(s(&["--resume", id])),
+                }
+                (args, Some(prompt.to_string()))
             }
             // `-` reads the whole prompt from stdin; the default sandbox stays read-only.
-            Platform::Codex => (s(&["exec", "--skip-git-repo-check", "-"]), Some(prompt.to_string())),
+            Platform::Codex => {
+                let args = match session {
+                    SessionArg::Unrecorded => s(&["exec", "--skip-git-repo-check", "-"]),
+                    // `--json` is the only way to learn the id of the session Codex creates.
+                    SessionArg::New(_) => s(&["exec", "--skip-git-repo-check", "--json", "-"]),
+                    SessionArg::Resume(id) => s(&["exec", "resume", "--skip-git-repo-check", "--json", id, "-"]),
+                };
+                (args, Some(prompt.to_string()))
+            }
             Platform::Cursor => (s(&["-p", &as_arg(), "--approve-mcps", "--output-format", "text"]), None),
             Platform::OpenCode => (s(&["run", &as_arg()]), None),
             Platform::Antigravity => (s(&["-p", &as_arg(), "--output-format", "text"]), None),
         };
-        Some(Invocation { program, args, stdin })
+        let json_events = self == Platform::Codex && session != SessionArg::Unrecorded;
+        Some(Invocation { program, args, stdin, json_events })
     }
 }
 
@@ -597,6 +769,34 @@ mod tests {
         let text = format!("model = \"x\"\n\n{BEGIN}\n[mcp_servers.crewconvo]\nurl = \"u\"\n{END}\n[other]\na = 1\n");
         assert_eq!(strip_block(&text), "model = \"x\"\n\n[other]\na = 1\n");
         assert_eq!(strip_block("a = 1\n"), "a = 1\n");
+    }
+
+    #[test]
+    fn reads_the_session_and_last_message_from_codex_events() {
+        let lines = [
+            "warning line",
+            r#"{"type":"thread.started","thread_id":"01a1"}"#,
+            r#"{"type":"turn.started"}"#,
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"first"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","text":"x"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done"}}"#,
+            r#"{"type":"turn.completed","usage":{}}"#,
+        ];
+        let ev = codex_events(&lines.join("\n"));
+        assert_eq!(ev.thread_id.as_deref(), Some("01a1"));
+        assert_eq!(ev.last_message.as_deref(), Some("done"));
+        assert!(ev.errors.is_empty());
+        assert_eq!(codex_events("plain text"), CodexEvents::default());
+    }
+
+    #[test]
+    fn recognises_a_session_that_no_longer_exists() {
+        assert!(session_missing("No conversation found with session ID: 019a0000-0000-7000-8000-000000000000"));
+        assert!(session_missing(
+            "Error: thread/resume: thread/resume failed: no rollout found for thread id 019a (code -32600)"
+        ));
+        assert!(!session_missing("Error: rate limit reached"));
+        assert!(!session_missing("command not found: rg"));
     }
 
     #[test]

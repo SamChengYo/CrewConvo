@@ -163,8 +163,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  register: (handle: string, display_name: string, password: string) =>
-    request<Member>('POST', '/api/auth/register', { handle, display_name, password }),
+  register: (email: string, name: string, password: string) =>
+    request<Member>('POST', '/api/auth/register', { email, name, password }),
+  /** `handle` is the e-mail address, or the name of an account created before e-mail sign-up. */
   login: (handle: string, password: string) => request<Member>('POST', '/api/auth/login', { handle, password }),
   logout: () => request<unknown>('POST', '/api/auth/logout'),
   me: () => request<Member>('GET', '/api/me'),
@@ -297,6 +298,8 @@ export interface SystemInfo {
   public_base_url_configured: boolean
   /** The server can set up the coding agents on the computer it runs on. */
   local_agents?: boolean
+  /** The workspace has a decision model that can be called; until then the app shows only its setup. */
+  decider_ready?: boolean
 }
 
 export const api2 = {
@@ -417,7 +420,38 @@ export interface LocalPlatform {
   /** Has a command-line program, so it can answer when mentioned. */
   can_wake: boolean
   note: string
-  agent: { agent_id: string; handle: string; online: boolean } | null
+  /** The description a new agent gets when none is written. */
+  default_role: string
+  /** A wake can continue an earlier session of this tool. */
+  keeps_sessions: boolean
+  agent: { agent_id: string; handle: string; online: boolean; description: string; expertise: string[] } | null
+}
+
+/** What one coding agent is responsible for. */
+export interface LocalRole {
+  description?: string
+  expertise?: string[]
+}
+
+/** A session of a coding agent's command-line tool that CrewConvo started, and what it is for. */
+export interface LocalSession {
+  id: string
+  platform: string
+  agent_id: string
+  agent_handle: string | null
+  conversation_id: string
+  conversation_name: string
+  thread_root_id: string | null
+  purpose: string
+  created_at: string
+  last_used_at: string
+  uses: number
+}
+
+export interface LocalSessionsInfo {
+  /** False when LOCAL_SESSIONS=new: every wake starts a new session. */
+  reuse: boolean
+  sessions: LocalSession[]
 }
 
 export interface LocalAgentsInfo {
@@ -436,7 +470,11 @@ export interface LocalInstallResult {
 
 export const localApi = {
   list: () => request<LocalAgentsInfo>('GET', '/api/local-agents'),
-  install: (body: { platforms: string[]; group_name?: string; channel_name?: string }) =>
+  install: (body: { platforms: string[]; group_name?: string; channel_name?: string; roles?: Record<string, LocalRole> }) =>
     request<LocalInstallResult>('POST', '/api/local-agents/install', body),
   remove: (platform: string) => request<unknown>('DELETE', `/api/local-agents/${platform}`),
+  setRole: (platform: string, role: LocalRole) =>
+    request<{ description: string; expertise: string[] }>('PUT', `/api/local-agents/${platform}/role`, role),
+  sessions: () => request<LocalSessionsInfo>('GET', '/api/local-agents/sessions'),
+  forgetSession: (id: string) => request<unknown>('DELETE', `/api/local-agents/sessions/${encodeURIComponent(id)}`),
 }

@@ -65,7 +65,7 @@ pub fn build_request(cx: &CallContext<'_>, input: &DecideInput) -> Value {
     body
 }
 
-fn extract_json(text: &str) -> Option<Value> {
+pub(crate) fn extract_json(text: &str) -> Option<Value> {
     if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
         return Some(v);
     }

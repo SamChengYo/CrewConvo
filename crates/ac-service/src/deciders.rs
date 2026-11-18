@@ -246,6 +246,18 @@ impl Service {
         Ok(self.inner.store.list_decider_configs(actor.workspace_id).await?.into_iter().map(|r| r.config).collect())
     }
 
+    /// Whether the workspace has a decision model that can actually be called.
+    pub async fn decider_ready(&self, workspace_id: Uuid) -> AppResult<bool> {
+        let configs = self.inner.store.list_decider_configs(workspace_id).await?;
+        Ok(configs.iter().any(ac_decider::DeciderChain::usable))
+    }
+
+    /// Asks the workspace's decision model a one-of-N question; None when it cannot answer.
+    pub async fn decider_pick(&self, workspace_id: Uuid, input: &ac_decider::PickInput) -> Option<String> {
+        let configs = self.inner.store.list_decider_configs(workspace_id).await.ok()?;
+        self.inner.decider.pick(&configs, input, std::time::Duration::from_secs(10)).await
+    }
+
     /// Calls one config once with a built-in sample message ("test" button).
     pub async fn test_decider_config(&self, actor: &Member, id: Uuid) -> AppResult<DeciderTestResult> {
         Service::require_admin(actor)?;

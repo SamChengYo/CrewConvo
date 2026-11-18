@@ -67,7 +67,13 @@ pub fn routes() -> Router<AppState> {
 
 #[derive(Deserialize)]
 struct RegisterBody {
-    handle: String,
+    /// E-mail + name + password is the sign-up form; `handle` is still accepted from older clients.
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    handle: Option<String>,
     #[serde(default)]
     display_name: String,
     password: String,
@@ -83,8 +89,12 @@ async fn register(State(s): State<AppState>, Json(b): Json<RegisterBody>) -> Api
         };
         return Err(crate::error::ApiError(ac_core::AppError::forbidden(why)));
     }
-    s.service.register(&b.handle, &b.display_name, &b.password).await?;
-    login_response(&s, &b.handle, &b.password).await
+    let member = match (&b.email, &b.name, &b.handle) {
+        (Some(email), Some(name), _) => s.service.register_account(email, name, &b.password).await?,
+        (_, _, Some(handle)) => s.service.register(handle, &b.display_name, &b.password).await?,
+        _ => return Err(crate::error::ApiError(ac_core::AppError::bad_request("請填寫信箱、名字與密碼"))),
+    };
+    login_response(&s, &member.handle, &b.password).await
 }
 
 #[derive(Deserialize)]
@@ -307,6 +317,11 @@ async fn post_message(
     Path(id): Path<Uuid>,
     Json(b): Json<PostBody>,
 ) -> ApiResult<impl IntoResponse> {
+    // Without a decision model nobody decides who answers an untagged message, so the app is
+    // not usable yet; the web UI shows the setup screen, and this keeps other clients honest.
+    if s.config.require_decider && !s.service.decider_ready(m.workspace_id).await? {
+        return Err(AppError::Conflict("請先設定決策模型".into()).into());
+    }
     Ok(Json(s.service.post_message(&m, None, id, &b.body, b.thread_root_id).await?))
 }
 
@@ -358,8 +373,15 @@ async fn search(
     Ok(Json(s.service.search().search(&m, &p).await?))
 }
 
-async fn system(State(s): State<AppState>, CurrentMember(_): CurrentMember, headers: HeaderMap) -> Json<Value> {
-    Json(json!({
+async fn system(
+    State(s): State<AppState>,
+    CurrentMember(m): CurrentMember,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    // With the requirement turned off the app never asks for a decision model.
+    let decider_ready = !s.config.require_decider || s.service.decider_ready(m.workspace_id).await?;
+    Ok(Json(json!({
+        "decider_ready": decider_ready,
         "edition": s.config.edition.as_str(),
         "registration_open": s.config.registration_open,
         "public_base_url": crate::integrations::base_url(&s, &headers),
@@ -373,7 +395,7 @@ async fn system(State(s): State<AppState>, CurrentMember(_): CurrentMember, head
         "local_agents": s.local.is_some(),
         "mcp_endpoint": "/mcp",
         "agent_ws_endpoint": "/agent/v1/ws",
-    }))
+    })))
 }
 
 async fn list_deciders(State(s): State<AppState>, CurrentMember(m): CurrentMember) -> ApiResult<impl IntoResponse> {

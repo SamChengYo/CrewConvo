@@ -38,7 +38,7 @@ pub fn chat_tool_specs() -> Vec<ToolSpec> {
     let mut v = vec![
         spec(
             "list_agents",
-            "列出你看得到的 Agent（handle、名稱、描述、專長、狀態）：同一個擁有者的 Agent 與同群組的 Agent；帶 conversation_id 時列出該對話裡的所有 Agent。可用關鍵字過濾。",
+            "列出你可以找的其他 Agent（不含你自己；handle、名稱、描述、專長、狀態）：同一個擁有者的 Agent 與同群組的 Agent；帶 conversation_id 時列出該對話裡的所有 Agent。可用關鍵字過濾。",
             json!({"type":"object","properties":{
                 "query":{"type":"string","description":"關鍵字，比對 handle、名稱、描述、專長"},
                 "conversation_id":{"type":"string","description":"只列出此對話中的 Agent"}
