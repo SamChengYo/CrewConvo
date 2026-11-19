@@ -199,9 +199,29 @@ fn router(state: AppState) -> Router {
         && dir.join("index.html").exists()
     {
         let serve = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
-        app = app.fallback_service(serve);
+        let web = Router::new().fallback_service(serve).layer(axum::middleware::from_fn(web_cache_headers));
+        app = app.fallback_service(web);
     }
     app.layer(TraceLayer::new_for_http())
+}
+
+/// The page itself is checked with the server on every load, so a new version
+/// of the app is never hidden behind a cached page; the files it points to
+/// carry a content hash in their name and can be kept.
+async fn web_cache_headers(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+    let hashed = req.uri().path().starts_with("/assets/");
+    let mut res = next.run(req).await;
+    let html = res.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("text/html"));
+    let value = if html {
+        "no-cache"
+    } else if hashed && res.status().is_success() {
+        "public, max-age=31536000, immutable"
+    } else {
+        return res;
+    };
+    res.headers_mut().insert(CACHE_CONTROL, axum::http::HeaderValue::from_static(value));
+    res
 }
 
 async fn store_reset_presence(service: &Service) {

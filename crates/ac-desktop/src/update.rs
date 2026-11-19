@@ -168,14 +168,40 @@ pub fn can_replace(exe: &Path) -> bool {
 }
 
 /// Removes what an earlier update left beside the program.
+///
+/// The version that started us may still be closing, and Windows will not
+/// delete its file until it has gone, so this keeps trying for a while in the
+/// background instead of giving up on the first refusal.
 pub fn clean_up(exe: &Path) {
-    for leftover in [old_path(exe), new_path(exe)] {
-        if leftover.exists()
-            && let Err(e) = std::fs::remove_file(&leftover)
-        {
-            tracing::warn!(error = %e, file = %leftover.display(), "could not remove a leftover update file");
-        }
+    let leftovers: Vec<PathBuf> = [old_path(exe), new_path(exe)]
+        .into_iter()
+        .filter(|p| p.exists() && std::fs::remove_file(p).is_err())
+        .collect();
+    if leftovers.is_empty() {
+        return;
     }
+    std::thread::spawn(move || {
+        for leftover in leftovers {
+            let mut last = None;
+            for _ in 0..60 {
+                match std::fs::remove_file(&leftover) {
+                    Ok(()) => {
+                        last = None;
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        last = None;
+                        break;
+                    }
+                    Err(e) => last = Some(e),
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            if let Some(e) = last {
+                tracing::warn!(error = %e, file = %leftover.display(), "could not remove a leftover update file");
+            }
+        }
+    });
 }
 
 /// Checks a downloaded file against what GitHub says it should be.

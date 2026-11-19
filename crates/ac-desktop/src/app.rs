@@ -365,6 +365,10 @@ pub fn run() {
     let mut offer: Option<Release> = None;
     let mut later: Option<String> = None;
     let mut first_check = true;
+    // Opening the window looks for a newer release too (not more often than every few minutes),
+    // and what that check finds is offered straight away, like the check at start.
+    let mut last_check: Option<std::time::Instant> = None;
+    let mut opened_check = false;
     // Set once the new program file is in place: started when the server has shut down.
     let restart: Arc<Mutex<Option<PathBuf>>> = Arc::default();
     // A page that must stay up after the server stopped (the restart failed).
@@ -458,12 +462,21 @@ pub fn run() {
                 {
                     let _ = webview.load_html(&offer_page(&r, replaceable));
                     screen = Screen::Offer;
+                } else if url.is_some()
+                    && offer.is_none()
+                    && last_check.is_none_or(|t| t.elapsed() >= Duration::from_secs(300))
+                {
+                    last_check = Some(std::time::Instant::now());
+                    opened_check = true;
+                    let _ = ask_check.send(false);
                 }
             }
             Event::UserEvent(UserEvent::Checked { result, asked }) => {
-                let at_start = first_check && !asked;
+                last_check = Some(std::time::Instant::now());
+                let at_start = (first_check || opened_check) && !asked;
                 if !asked {
                     first_check = false;
+                    opened_check = false;
                 }
                 match result {
                     Ok(Some(r)) => {

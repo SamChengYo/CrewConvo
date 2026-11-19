@@ -1613,8 +1613,8 @@ fn ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
 /// Picks the session this wake continues, and reserves it. None → start a new one.
 ///
 /// A wake in a thread continues that thread's session. Otherwise the workspace's decision
-/// model reads what each session is for and picks one (or none); when it cannot be asked, the
-/// latest session of the same conversation is used.
+/// model reads what each session of this conversation is for and picks one (or none); when it
+/// cannot be asked, the latest session of the conversation is used.
 async fn choose_session<'a>(
     inner: &'a Inner,
     local: &LocalAgent,
@@ -1623,8 +1623,10 @@ async fn choose_session<'a>(
     dir: Option<&str>,
 ) -> Option<Claim<'a>> {
     let now = Utc::now();
-    // Only sessions created in the folder this wake works in: every rule below chooses among these.
+    // Only sessions created in the folder this wake works in, and only this conversation's own:
+    // a new conversation always starts from nothing, whatever else happened in the same project.
     let mut candidates = inner.sessions.candidates(&local.platform, local.agent_id, dir, now);
+    candidates.retain(|r| r.conversation_id == payload.conversation.id);
     if candidates.is_empty() {
         return None;
     }

@@ -388,8 +388,8 @@ mod tests {
             s.add(r);
         }
         let here = s.candidates("claude-code", agent, Some("/work/shop"), Utc::now());
-        // All three are in this folder, so all three are what the decision model may choose
-        // from; the rules that need no model never cross conversations.
+        // All three are in this folder; the caller keeps only the waking conversation's own
+        // before any rule or the decision model chooses, so nothing crosses conversations.
         assert_eq!(here.len(), 3);
         assert_eq!(by_conversation(&here, first, None).map(|r| r.id.as_str()), Some("first"));
         assert_eq!(by_conversation(&here, second, None).map(|r| r.id.as_str()), Some("second"));
