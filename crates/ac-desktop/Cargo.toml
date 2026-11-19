@@ -22,6 +22,9 @@ wry = "0.57"
 tray-icon = "0.26"
 include_dir = "0.7"
 winreg = "0.56"
+reqwest.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

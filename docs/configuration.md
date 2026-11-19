@@ -57,11 +57,22 @@ CrewConvo 的設定全部來自環境變數。最簡單的做法是在伺服器�
 | `CREWCONVO_MASTER_KEY` | 自動產生 | 加密儲存的機密（決策模型的 API key、平台連線的 token）。32 個隨機位元組的 base64。留白時自動產生並存到 `DATA_DIR/master.key`。**弄丟這把金鑰，已儲存的機密就解不開** |
 | `SEARCH_INDEX_DIR` | `DATA_DIR/search-index` | 全文搜尋索引。刪掉後會在下次啟動時從資料庫重建 |
 | `WEB_DIST` | 自動 | 網頁檔案的位置 |
-| `LOCAL_AGENTS` | 依情況 | 是否在網頁提供「這台電腦的 Coding Agent」：由伺服器直接偵測、安裝並喚醒它所在電腦上的 Coding Agent。預設只在 Personal 版且 `BIND_ADDR` 是本機位址時開啟。連線資訊與每個 Agent 的權限存在 `DATA_DIR/local-agents.json`；對話綁定的專案資料夾在 `DATA_DIR/local-projects.json`，尚未合併的工作成果（git worktree）在 `DATA_DIR/local-work.json` |
+| `LOCAL_AGENTS` | 依情況 | 是否在網頁提供「這台電腦的 Coding Agent」：由伺服器直接偵測、安裝並喚醒它所在電腦上的 Coding Agent。預設只在 Personal 版且 `BIND_ADDR` 是本機位址時開啟。沒有綁定專案資料夾的對話，Agent 在 `DATA_DIR/workspaces/<名稱>` 裡執行。連線資訊與每個 Agent 的權限存在 `DATA_DIR/local-agents.json`；對話綁定的專案資料夾在 `DATA_DIR/local-projects.json`，尚未合併的工作成果（git worktree）在 `DATA_DIR/local-work.json` |
 | `LOCAL_SESSIONS` | `reuse` | 這台電腦的 Coding Agent 被叫起來時要不要接續先前的工作階段（session）。`reuse`：CrewConvo 記下它開過的工作階段和各自的用途（`DATA_DIR/local-sessions.json`），每次喚醒挑一個合適的接續——同一個討論串接續同一個；其他情況由決策模型依用途挑選，決策模型無法回答時接續同一個頻道最近用過的；沒有合適的就開新的。超過 7 天沒用或已用 30 次的不再接續，30 天沒動過的紀錄會刪除；工作階段在 Coding Agent 那邊被刪掉時，紀錄會跟著刪除並改開新的。`new`：每次都開新的，不記錄。只有 Claude Code 和 Codex 支援接續，其他一律開新的 |
 | `REQUIRE_DECIDER` | `true` | 工作區沒有可用的決策模型（至少一筆啟用、而且需要金鑰的協定已填金鑰）時，網頁只顯示決策模型的設定畫面，人類發訊息會收到 409「請先設定決策模型」。`false` 取消這項要求 |
+| `LOCAL_LIVE_MESSAGES` | `true` | 這台電腦的 Coding Agent 執行途中，對話裡有給它的新訊息（判斷方式與平常的喚醒相同）直接送進正在進行的執行，而不是等它做完再叫一次。Claude Code 以 `--input-format stream-json` 執行，Codex 以 `codex app-server` 執行；其他 Coding Agent 不支援，照舊排隊。`false`：全部改回「給一段提示、跑完結束」（Codex 用 `codex exec`） |
+| `LOCAL_CODEX_WINDOWS_SANDBOX` | 不指定 | Windows 上 CrewConvo 叫起 Codex 時使用的沙箱實作，等同替那次執行加上 `-c windows.sandbox=<值>`，不會改動 `~/.codex/config.toml`。`elevated`：另外的沙箱帳號，隔離最完整，第一次使用（以及沙箱帳號被重設後）Windows 會跳系統管理員確認（UAC）；`unelevated`：受限權杖，不需要系統管理員權限、不會跳 UAC，隔離較弱；`mxc`：Codex 桌面版使用的實作。不指定就照 Codex 自己的設定 |
 
 Windows 桌面應用程式（`CrewConvo.exe`）把 `DATA_DIR` 預設成 `%LOCALAPPDATA%\CrewConvo\data`，並讀取 `%LOCALAPPDATA%\CrewConvo\.env`；記錄寫在同一個資料夾的 `logs\crewconvo.log`。
+
+### 版本與更新（Windows 桌面應用程式）
+
+| 變數 | 預設 | 說明 |
+|---|---|---|
+| `UPDATE_CHECK` | `true` | 啟動時與之後每 6 小時向 GitHub 查詢最新的 release；有新版本時在視窗裡詢問，使用者按「立即更新」才下載安裝。`false`：不自動查詢（系統匣的「檢查更新」仍可手動查） |
+| `UPDATE_FEED_URL` | GitHub | **開發用。** 改向這個網址查詢「最新版本」（回應格式與 GitHub 的 `releases/latest` 相同）。只有設定了它，才允許 GitHub 以外的主機與 http；正式使用不要設定 |
+
+版本號在建置時由環境變數 `CREWCONVO_VERSION` 帶入（release workflow 會帶入 tag，例如 `v0.6.0`），`GET /api/system` 的 `version` 欄位會回報它。沒有帶入的是開發版本：`version` 是 null，桌面應用程式不會檢查更新。
 
 ## 模型（內建 Agent 用，選填）
 

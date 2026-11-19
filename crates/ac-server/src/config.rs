@@ -82,6 +82,12 @@ pub struct ServerConfig {
     /// People cannot post until the workspace has a usable decision model (`REQUIRE_DECIDER`,
     /// default on). Off in tests, which mostly run without one.
     pub require_decider: bool,
+    /// Hand messages that arrive while a local coding agent works to the run in progress
+    /// (`LOCAL_LIVE_MESSAGES`, default on). Off: every tool gets a prompt, runs, and exits.
+    pub local_live_messages: bool,
+    /// `[windows] sandbox` to run Codex with (`LOCAL_CODEX_WINDOWS_SANDBOX`: elevated,
+    /// unelevated or mxc). None: whatever Codex's own configuration says.
+    pub local_codex_windows_sandbox: Option<String>,
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
@@ -174,6 +180,14 @@ impl ServerConfig {
                 "new" => false,
                 other => return Err(format!("LOCAL_SESSIONS must be reuse or new (got {other})")),
             };
+        let local_codex_windows_sandbox =
+            match std::env::var("LOCAL_CODEX_WINDOWS_SANDBOX").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+                "" => None,
+                v @ ("elevated" | "unelevated" | "mxc") => Some(v.to_string()),
+                other => {
+                    return Err(format!("LOCAL_CODEX_WINDOWS_SANDBOX must be elevated, unelevated or mxc (got {other})"));
+                }
+            };
         Ok(ServerConfig {
             edition,
             // The Personal edition has exactly one human account.
@@ -198,6 +212,8 @@ impl ServerConfig {
             local_agents,
             local_sessions_reuse,
             require_decider: env_flag("REQUIRE_DECIDER", true),
+            local_live_messages: env_flag("LOCAL_LIVE_MESSAGES", true),
+            local_codex_windows_sandbox,
         })
     }
 }

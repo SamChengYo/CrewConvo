@@ -19,6 +19,10 @@ jobs:
           - os: windows-latest
             name: windows-x86_64
     runs-on: ${{ matrix.os }}
+    env:
+      # Baked into the server and the desktop app (shown in /api/system, compared by the
+      # desktop app when it looks for updates). A build without it is a development build.
+      CREWCONVO_VERSION: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

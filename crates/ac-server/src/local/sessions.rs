@@ -341,6 +341,42 @@ mod tests {
     }
 
     #[test]
+    fn rebinding_a_conversation_to_another_folder_leaves_its_old_sessions_behind() {
+        let d = dir("rebind");
+        let s = Sessions::load(&d);
+        let (agent, conv, thread) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        // Made while the conversation was bound to the old folder: one for the conversation,
+        // one for a thread of it.
+        let mut main = rec("old-main", agent, conv, None, 0, 1);
+        main.dir = Some("/work/old".into());
+        s.add(main);
+        let mut in_thread = rec("old-thread", agent, conv, Some(thread), 0, 1);
+        in_thread.dir = Some("/work/old".into());
+        s.add(in_thread);
+
+        // Same conversation, same thread, now bound to another folder: none of the rules
+        // that choose a session has anything to choose from.
+        let now = s.candidates("claude-code", agent, Some("/work/new"), Utc::now());
+        assert!(now.is_empty());
+        assert!(by_thread(&now, Some(thread)).is_none());
+        assert!(by_conversation(&now, conv, None).is_none());
+
+        // A session made in the new folder is the only one continued there…
+        let mut fresh = rec("new-main", agent, conv, None, 0, 1);
+        fresh.dir = Some("/work/new".into());
+        s.add(fresh);
+        let now = s.candidates("claude-code", agent, Some("/work/new"), Utc::now());
+        assert_eq!(by_conversation(&now, conv, None).map(|r| r.id.as_str()), Some("new-main"));
+        assert!(by_thread(&now, Some(thread)).is_none());
+
+        // …and binding the old folder again finds the old ones, untouched.
+        let back = s.candidates("claude-code", agent, Some("/work/old"), Utc::now());
+        assert_eq!(by_thread(&back, Some(thread)).map(|r| r.id.as_str()), Some("old-thread"));
+        assert_eq!(by_conversation(&back, conv, None).map(|r| r.id.as_str()), Some("old-main"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn purpose_says_what_it_is_for_and_what_it_did_last() {
         let long = "請幫我".repeat(40);
         let p = initial_purpose("#dev", &format!("  第一行\n第二行 {long}"));

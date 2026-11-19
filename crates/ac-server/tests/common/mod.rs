@@ -69,6 +69,8 @@ pub async fn fixture_with(o: Opts) -> Fx {
         local_sessions_reuse: true,
         // Most tests post messages in a workspace without a decision model.
         require_decider: false,
+        local_live_messages: true,
+        local_codex_windows_sandbox: None,
     };
     let llm_cfg = if o.real_llm {
         LlmConfig { enable_mock: true, ..LlmConfig::from_env() }

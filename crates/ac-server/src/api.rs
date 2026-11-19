@@ -382,6 +382,7 @@ async fn system(
     let decider_ready = !s.config.require_decider || s.service.decider_ready(m.workspace_id).await?;
     Ok(Json(json!({
         "decider_ready": decider_ready,
+        "version": crate::version(),
         "edition": s.config.edition.as_str(),
         "registration_open": s.config.registration_open,
         "public_base_url": crate::integrations::base_url(&s, &headers),

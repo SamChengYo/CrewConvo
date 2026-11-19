@@ -8,6 +8,8 @@
 
 #[cfg(windows)]
 mod app;
+#[cfg(windows)]
+mod update;
 
 fn main() {
     #[cfg(windows)]

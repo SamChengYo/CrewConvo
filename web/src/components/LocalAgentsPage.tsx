@@ -225,7 +225,27 @@ export default function LocalAgentsPage({ onOpen, onError }: Props) {
     }
   }
 
+  // Work made from the folder a conversation is bound to now: it stays behind when the folder changes.
+  const leftBehind = (c: LocalProject) => work.filter((w) => w.conversation_id === c.conversation_id && w.project === c.path)
+
+  const confirmFolderChange = (c: LocalProject, to: string | null) => {
+    if (!c.path) return true
+    const left = leftBehind(c)
+    const lines = [
+      to ? `要把 ${c.name} 的專案資料夾改成別的資料夾嗎？` : `要移除 ${c.name} 的專案資料夾嗎？`,
+      `原本：${c.path}`,
+      ...(to ? [`改成：${to}`] : []),
+      '',
+      '・對話裡會出現一則變更通知；之前的訊息談的是原本的資料夾。',
+      '・Coding Agent 在原本資料夾的工作階段不會帶到新的資料夾。',
+    ]
+    if (left.length > 0) lines.push(`・原本的資料夾還有 ${left.length} 份尚未合併的工作成果。它們會繼續列在「工作成果」，合併或捨棄仍然是針對原本的資料夾；建議先處理完再改。`)
+    return confirm(lines.join('\n'))
+  }
+
   const saveProject = async (c: LocalProject) => {
+    const to = (paths[c.conversation_id] ?? '').trim()
+    if (!confirmFolderChange(c, to)) return
     try {
       await localApi.setProject(c.conversation_id, paths[c.conversation_id] ?? '')
       setPaths((all) => Object.fromEntries(Object.entries(all).filter(([id]) => id !== c.conversation_id)))
@@ -236,6 +256,7 @@ export default function LocalAgentsPage({ onOpen, onError }: Props) {
   }
 
   const clearProject = async (c: LocalProject) => {
+    if (!confirmFolderChange(c, null)) return
     try {
       await localApi.clearProject(c.conversation_id)
       setPaths((all) => Object.fromEntries(Object.entries(all).filter(([id]) => id !== c.conversation_id)))
@@ -523,6 +544,9 @@ export default function LocalAgentsPage({ onOpen, onError }: Props) {
                 <div className="muted small mono">
                   {w.branch} → {w.base_branch ?? '（當時不在任何分支上）'}・{w.project}
                 </div>
+                {!w.current_folder && (
+                  <p className="pill-note warn">這份工作屬於上面這個資料夾，它已經不是這個對話目前綁定的資料夾。合併會併入這個原本的資料夾，不是對話現在的資料夾。</p>
+                )}
                 {w.diffstat && <pre className="local-diffstat">{w.diffstat}</pre>}
               </div>
             ))}

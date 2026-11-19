@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Access {
     /// Read files, answer.
@@ -143,10 +143,60 @@ pub fn statement_for(
     format!("{who}{place}{level}")
 }
 
+/// What follows the statement: what to tell people when the wake cannot do what is asked,
+/// and what to watch out for in the folder it works in.
+///
+/// `explained`: the statement already says why the wake is read-only.
+pub fn guidance(project_bound: bool, access: Access, explained: bool, shared: bool) -> String {
+    let mut text = String::new();
+    if !project_bound {
+        // Its own empty folder: writing "the app" there would be work nobody finds.
+        text.push_str(
+            "這個對話沒有綁定專案資料夾：你現在在平台給你的空白資料夾裡，裡面沒有使用者的程式碼。\
+             被要求寫程式或修改檔案時，不要假裝完成，也不要把整份程式碼貼在訊息裡交差；\
+             請回覆說明：要先到「這台電腦的 Coding Agent」頁面，在「專案資料夾」替這個對話綁定一個資料夾，\
+             並把你的權限設成「可修改檔案」，然後再交代一次。可以先討論做法與分工。",
+        );
+    } else {
+        // The folder of a conversation can be changed; what was said before is still there.
+        text.push_str("對話裡較早的訊息提到的檔案路徑可能屬於之前綁定的另一個資料夾，一律以這裡寫的資料夾為準。");
+        if access == Access::Read && !explained {
+            text.push_str(
+                "被要求修改檔案時，請回覆說明：擁有者要先在「這台電腦的 Coding Agent」頁面把你的權限設成「可修改檔案」。",
+            );
+        }
+    }
+    if shared {
+        text.push_str(
+            "注意：這個資料夾不是 git 專案，你沒有自己的工作副本——對話裡的其他 Agent 此刻可能也在這個資料夾裡修改檔案。\
+             動任何檔案之前，先在對話裡講好誰負責哪些檔案，只動自己負責的；要改別人的檔案先問。",
+        );
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn guidance_tells_people_what_to_set_up() {
+        let none = guidance(false, Access::Read, false, false);
+        assert!(none.contains("沒有綁定專案資料夾") && none.contains("專案資料夾") && none.contains("可修改檔案"));
+        let read = guidance(true, Access::Read, false, false);
+        assert!(read.contains("權限設成「可修改檔案」") && read.contains("一律以這裡寫的資料夾為準"));
+        // The statement already said it is read-only because somebody else asked.
+        assert!(!guidance(true, Access::Read, true, false).contains("權限設成"));
+        let shared = guidance(true, Access::Edit, false, true);
+        assert!(shared.contains("其他 Agent 此刻可能也在這個資料夾裡修改檔案") && shared.contains("講好誰負責哪些檔案"));
+        assert!(!guidance(true, Access::Edit, false, false).contains("其他 Agent"));
+    }
+
+    #[test]
+    fn levels_are_ordered() {
+        assert!(Access::Read < Access::Edit && Access::Edit < Access::Full);
+    }
 
     #[test]
     fn only_the_owner_in_person_counts() {

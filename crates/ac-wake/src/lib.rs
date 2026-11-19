@@ -7,6 +7,7 @@
 mod decide;
 mod discussion;
 mod hub;
+mod live;
 mod rules;
 mod worker;
 

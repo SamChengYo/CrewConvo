@@ -12,7 +12,12 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use wry::WebViewBuilder;
 
+use crate::update::{self, Release};
+
 include!("icon.rs");
+
+/// How often a running app looks for a newer release.
+const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 /// The built web interface, carried inside the program.
 static WEB: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../web/dist");
@@ -28,6 +33,26 @@ enum UserEvent {
     Stopped,
     Show,
     Menu(String),
+    /// A button on one of our own pages was pressed.
+    Button(String),
+    /// A check for a newer release ended. `asked`: the user asked for it from the tray menu.
+    Checked { result: Result<Option<Release>, String>, asked: bool },
+    /// The new program file is in place of this one; what is left is to restart.
+    Installed,
+    InstallFailed(String),
+}
+
+/// What the window shows, as far as updating is concerned. Buttons only count on the page
+/// they belong to: the web interface (or anything inside it) cannot press them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    App,
+    Offer,
+    /// "Coding agents are running — update anyway?"
+    Confirm,
+    Installing,
+    /// A message with a single way back.
+    Notice,
 }
 
 /// `%LOCALAPPDATA%\CrewConvo`: settings (.env), data, logs.
@@ -64,6 +89,59 @@ fn page(title: &str, body: &str, spinner: bool) -> String {
          </style><div class=\"box\">{spin}<h1>{}</h1>{body}</div></html>",
         escape(title)
     )
+}
+
+/// One of our own pages with buttons: (what pressing it means, label, is the main one).
+fn dialog(title: &str, body: &str, buttons: &[(&str, &str, bool)]) -> String {
+    let mut html = String::from(
+        "<style>.row{margin-top:22px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}\
+         button{font:inherit;padding:9px 20px;border-radius:8px;border:1px solid #c9c9d6;background:transparent;\
+         color:inherit;cursor:pointer}button.main{background:#4f46e5;border-color:#4f46e5;color:#fff}\
+         a{color:#4f46e5;cursor:pointer;text-decoration:underline}.v{font-family:Consolas,monospace}</style>",
+    );
+    html.push_str(body);
+    html.push_str("<div class=\"row\">");
+    for (id, label, main) in buttons {
+        let class = if *main { " class=\"main\"" } else { "" };
+        html.push_str(&format!(
+            "<button id=\"{id}\"{class} onclick=\"window.ipc.postMessage('{id}')\">{}</button>",
+            escape(label)
+        ));
+    }
+    html.push_str("</div>");
+    page(title, &html, false)
+}
+
+fn version_label() -> String {
+    match update::current() {
+        Some(v) => format!("版本 {v}"),
+        None => "開發版本（不檢查更新）".to_string(),
+    }
+}
+
+fn offer_page(release: &Release, replaceable: bool) -> String {
+    let current = escape(update::current().unwrap_or("?"));
+    let new = escape(&release.version);
+    let notes = "<p><a onclick=\"window.ipc.postMessage('update:notes')\">這個版本改了什麼</a></p>";
+    if replaceable {
+        let body = format!(
+            "<p>目前版本 <span class=\"v\">{current}</span> → 新版本 <span class=\"v\">{new}</span></p>{notes}\
+             <p>按「立即更新」會下載新版、驗證後取代目前的程式並重新啟動，資料會保留。不按就不會下載任何東西。</p>"
+        );
+        dialog("有新版本可以更新", &body, &[("update:install", "立即更新", true), ("update:later", "稍後", false)])
+    } else {
+        // The program sits somewhere it cannot be replaced from within (no write access).
+        let body = format!(
+            "<p>目前版本 <span class=\"v\">{current}</span> → 新版本 <span class=\"v\">{new}</span></p>{notes}\
+             <p>CrewConvo 所在的資料夾無法寫入，所以不能自動更新。請按「前往下載」取得新版，結束 CrewConvo 後用新的檔案取代舊的。</p>"
+        );
+        dialog("有新版本可以更新", &body, &[("update:download", "前往下載", true), ("update:later", "稍後", false)])
+    }
+}
+
+/// Starts the program file again after an update and lets it wait for us to exit.
+fn start_updated(exe: &Path) -> std::io::Result<()> {
+    std::process::Command::new(exe).arg("--updated").spawn().map(|_| ())
 }
 
 fn autostart_enabled() -> bool {
@@ -114,10 +192,28 @@ pub fn run() {
     set_default("WEB_DIST", dir.join("web"));
     set_default("WEBVIEW2_USER_DATA_FOLDER", dir.join("webview"));
     let hidden = std::env::args().any(|a| a == "--hidden");
+    // Started by the previous version at the end of an update: it is still shutting down.
+    let updated = std::env::args().any(|a| a == "--updated");
 
     // Only one copy runs the server; a second one just shows the first one's interface.
     let lock = File::options().create(true).read(true).write(true).truncate(false).open(dir.join("app.lock")).ok();
-    let primary = lock.as_ref().is_some_and(|f| f.try_lock().is_ok());
+    let mut primary = lock.as_ref().is_some_and(|f| f.try_lock().is_ok());
+    if updated && !primary {
+        // Wait for the old program to let go (it stops the database first) instead of
+        // becoming a mere window onto a server that is about to disappear.
+        for _ in 0..120 {
+            std::thread::sleep(Duration::from_millis(500));
+            if lock.as_ref().is_some_and(|f| f.try_lock().is_ok()) {
+                primary = true;
+                break;
+            }
+        }
+    }
+    let exe = std::env::current_exe().ok();
+    if primary && let Some(exe) = &exe {
+        // The previous version's file, renamed aside by the update that started us.
+        update::clean_up(exe);
+    }
 
     if primary {
         if let Ok(log) = File::options().create(true).append(true).open(dir.join("logs").join("crewconvo.log")) {
@@ -145,7 +241,10 @@ pub fn run() {
         "<p>第一次啟動要下載內建資料庫，大約需要一分鐘，之後幾秒就會好。</p>",
         true,
     );
-    let builder = WebViewBuilder::new();
+    let buttons = event_loop.create_proxy();
+    let builder = WebViewBuilder::new().with_ipc_handler(move |request: wry::http::Request<String>| {
+        let _ = buttons.send_event(UserEvent::Button(request.body().clone()));
+    });
     let builder = if primary { builder.with_html(loading) } else { builder.with_url(local_url()) };
     let webview = builder.build(&window).expect("create web view");
 
@@ -187,6 +286,8 @@ pub fn run() {
     let browser_item = MenuItem::with_id("browser", "在瀏覽器開啟", true, None);
     let folder_item = MenuItem::with_id("folder", "開啟資料夾（設定、資料、記錄）", true, None);
     let autostart_item = CheckMenuItem::with_id("autostart", "開機時自動啟動", true, autostart_enabled(), None);
+    let update_item = MenuItem::with_id("update", "檢查更新", true, None);
+    let version_item = MenuItem::with_id("version", version_label(), false, None);
     let quit_item = MenuItem::with_id("quit", "結束 CrewConvo", true, None);
     let _ = menu.append_items(&[
         &open_item,
@@ -195,8 +296,39 @@ pub fn run() {
         &autostart_item,
         &folder_item,
         &PredefinedMenuItem::separator(),
+        &update_item,
+        &version_item,
+        &PredefinedMenuItem::separator(),
         &quit_item,
     ]);
+
+    // Looking for a newer release: once the server is up, then every few hours, and when asked
+    // from the menu. Failures are only logged — being offline is not worth a message.
+    let (ask_check, check_requests) = std::sync::mpsc::channel::<bool>();
+    {
+        let proxy = event_loop.create_proxy();
+        std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+            loop {
+                // `true`: the user asked; a timeout: it is time for the regular check.
+                let asked = match check_requests.recv_timeout(CHECK_EVERY) {
+                    Ok(asked) => asked,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+                    Err(_) => return,
+                };
+                if !asked && !update::check_enabled() {
+                    continue;
+                }
+                let result = rt.block_on(update::check());
+                match &result {
+                    Ok(Some(r)) => tracing::info!(version = %r.version, "a newer release is available"),
+                    Ok(None) => tracing::info!("update check: this is the latest release"),
+                    Err(e) => tracing::warn!(error = %e, "update check failed"),
+                }
+                let _ = proxy.send_event(UserEvent::Checked { result, asked });
+            }
+        });
+    }
     let tray = TrayIconBuilder::new()
         .with_tooltip("CrewConvo")
         .with_menu(Box::new(menu))
@@ -228,8 +360,18 @@ pub fn run() {
     let mut url: Option<String> = None;
     let mut quitting = false;
     let mut told_about_tray = false;
+    let mut screen = Screen::App;
+    // The newer release we know of, and the one the user said "later" to (until the next start).
+    let mut offer: Option<Release> = None;
+    let mut later: Option<String> = None;
+    let mut first_check = true;
+    // Set once the new program file is in place: started when the server has shut down.
+    let restart: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+    // A page that must stay up after the server stopped (the restart failed).
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let installer = event_loop.create_proxy();
     event_loop.run(move |event, _, control_flow| {
-        let _keep = (&tray, &lock, &open_item, &browser_item, &folder_item, &quit_item);
+        let _keep = (&tray, &lock, &open_item, &browser_item, &folder_item, &quit_item, &update_item, &version_item);
         *control_flow = ControlFlow::Wait;
         let mut quit = || {
             if !quitting {
@@ -237,12 +379,28 @@ pub fn run() {
                 window.set_visible(false);
                 stop.notify_one();
                 // Never hang on exit: the database gets a few seconds to stop cleanly.
-                std::thread::spawn(|| {
+                let (restart, hold) = (restart.clone(), hold.clone());
+                std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_secs(12));
-                    std::process::exit(0);
+                    if let Some(exe) = restart.lock().unwrap().take() {
+                        let _ = start_updated(&exe);
+                    }
+                    if !hold.load(std::sync::atomic::Ordering::SeqCst) {
+                        std::process::exit(0);
+                    }
                 });
             }
         };
+        let bring_up = || {
+            window.set_visible(true);
+            window.set_minimized(false);
+            window.set_focus();
+        };
+        // The offer is shown when the window is opened, not in the middle of what the user is doing.
+        let offer_due = |offer: &Option<Release>, later: &Option<String>| {
+            offer.as_ref().filter(|r| later.as_deref() != Some(r.version.as_str())).cloned()
+        };
+        let replaceable = exe.as_deref().is_some_and(update::can_replace);
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 if has_tray && url.is_some() {
@@ -258,6 +416,8 @@ pub fn run() {
             Event::UserEvent(UserEvent::Ready(u)) => {
                 let _ = webview.load_url(&u);
                 url = Some(u);
+                // The check at start (a no-op for development builds and with UPDATE_CHECK=false).
+                let _ = ask_check.send(false);
             }
             Event::UserEvent(UserEvent::Failed(msg)) => {
                 let body = format!(
@@ -270,19 +430,154 @@ pub fn run() {
             }
             Event::UserEvent(UserEvent::Stopped) => {
                 if quitting {
-                    *control_flow = ControlFlow::Exit;
+                    let pending = restart.lock().unwrap().take();
+                    match pending.map(|exe| start_updated(&exe).map_err(|e| (exe, e))) {
+                        Some(Err((exe, e))) => {
+                            // The new file is in place but will not start: put the old one back.
+                            tracing::error!(error = %e, "the updated program did not start");
+                            let restored = update::restore(&exe);
+                            hold.store(true, std::sync::atomic::Ordering::SeqCst);
+                            let body = format!(
+                                "<p>新版本無法啟動：{}</p><p>{}</p><p>請結束後重新開啟 CrewConvo。</p>",
+                                escape(&e.to_string()),
+                                if restored.is_ok() { "已經還原成原本的版本。" } else { "原本的程式檔在旁邊的 .old 檔案。" }
+                            );
+                            let _ = webview.load_html(&dialog("更新沒有完成", &body, &[("app:exit", "結束", true)]));
+                            screen = Screen::Notice;
+                            window.set_visible(true);
+                        }
+                        _ => *control_flow = ControlFlow::Exit,
+                    }
                 }
             }
             Event::UserEvent(UserEvent::Show) => {
-                window.set_visible(true);
-                window.set_minimized(false);
-                window.set_focus();
+                bring_up();
+                if screen == Screen::App
+                    && url.is_some()
+                    && let Some(r) = offer_due(&offer, &later)
+                {
+                    let _ = webview.load_html(&offer_page(&r, replaceable));
+                    screen = Screen::Offer;
+                }
+            }
+            Event::UserEvent(UserEvent::Checked { result, asked }) => {
+                let at_start = first_check && !asked;
+                if !asked {
+                    first_check = false;
+                }
+                match result {
+                    Ok(Some(r)) => {
+                        offer = Some(r.clone());
+                        // Asked for, or the check right after opening the app: show it now.
+                        // A later routine check waits until the window is opened again.
+                        let now = asked || (at_start && window.is_visible() && offer_due(&offer, &later).is_some());
+                        if now && screen == Screen::App && url.is_some() {
+                            let _ = webview.load_html(&offer_page(&r, replaceable));
+                            screen = Screen::Offer;
+                            if asked {
+                                bring_up();
+                            }
+                        }
+                    }
+                    Ok(None) | Err(_) if !asked || screen != Screen::App => {}
+                    Ok(None) => {
+                        let body = format!("<p>{}</p>", escape(&version_label()));
+                        let _ = webview.load_html(&dialog("已經是最新版本", &body, &[("update:back", "返回", true)]));
+                        screen = Screen::Notice;
+                        bring_up();
+                    }
+                    Err(e) => {
+                        let body = format!("<p>{}</p><p>請確認網路連線後再試一次。</p>", escape(&e));
+                        let _ = webview.load_html(&dialog("無法檢查更新", &body, &[("update:back", "返回", true)]));
+                        screen = Screen::Notice;
+                        bring_up();
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::Button(id)) => {
+                let back = |screen: &mut Screen| {
+                    if let Some(u) = &url {
+                        let _ = webview.load_url(u);
+                    }
+                    *screen = Screen::App;
+                };
+                let install = |screen: &mut Screen| {
+                    let (Some(release), Some(exe)) = (offer.clone(), exe.clone()) else { return };
+                    let body = format!("<p>正在下載並驗證 {}，完成後會自動重新啟動。</p>", escape(&release.version));
+                    let _ = webview.load_html(&page("正在更新 CrewConvo…", &body, true));
+                    *screen = Screen::Installing;
+                    let proxy = installer.clone();
+                    std::thread::spawn(move || {
+                        let result = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| e.to_string())
+                            .and_then(|rt| rt.block_on(update::install(&release, &exe)));
+                        let _ = proxy.send_event(match result {
+                            Ok(()) => UserEvent::Installed,
+                            Err(e) => UserEvent::InstallFailed(e),
+                        });
+                    });
+                };
+                // A button only counts on the page that shows it.
+                match (screen, id.as_str()) {
+                    (Screen::Offer | Screen::Confirm, "update:later") => {
+                        later = offer.as_ref().map(|r| r.version.clone());
+                        back(&mut screen);
+                    }
+                    (Screen::Notice, "update:back") => back(&mut screen),
+                    (Screen::Notice, "app:exit") => std::process::exit(0),
+                    (Screen::Offer | Screen::Notice, "update:notes" | "update:download") => {
+                        // Opened in the browser, and only when it really is a GitHub page.
+                        if let Some(r) = offer.as_ref().filter(|r| update::url_allowed(&r.notes_url, false)) {
+                            open_in_shell(r.notes_url.as_ref());
+                        }
+                    }
+                    (Screen::Offer, "update:install") => {
+                        let running = ac_server::local::active_runs();
+                        if running > 0 {
+                            let body = format!(
+                                "<p>現在有 {running} 個 Coding Agent 正在執行。更新會重新啟動 CrewConvo，它們會被中止，做到一半的工作不會完成。</p>\
+                                 <p>要現在更新，還是等它們做完？</p>"
+                            );
+                            let buttons =
+                                [("update:install-anyway", "中止它們並更新", true), ("update:later", "稍後", false)];
+                            let _ = webview.load_html(&dialog("Coding Agent 還在執行", &body, &buttons));
+                            screen = Screen::Confirm;
+                        } else {
+                            install(&mut screen);
+                        }
+                    }
+                    (Screen::Confirm, "update:install-anyway") => install(&mut screen),
+                    _ => {}
+                }
+            }
+            Event::UserEvent(UserEvent::Installed) => {
+                tracing::info!("update installed; restarting");
+                *restart.lock().unwrap() = exe.clone();
+                let _ = webview.load_html(&page("正在重新啟動 CrewConvo…", "<p>新版本已經就緒。</p>", true));
+                quit();
+            }
+            Event::UserEvent(UserEvent::InstallFailed(msg)) => {
+                tracing::warn!(error = %msg, "update failed; the program was not changed");
+                let body = format!(
+                    "<p>{}</p><p>目前的版本沒有被更動，可以繼續使用。</p>\
+                     <p>也可以<a onclick=\"window.ipc.postMessage('update:download')\">自己下載新版</a>。</p>",
+                    escape(&msg)
+                );
+                let _ = webview.load_html(&dialog("更新沒有完成", &body, &[("update:back", "返回", true)]));
+                screen = Screen::Notice;
             }
             Event::UserEvent(UserEvent::Menu(id)) => match id.as_str() {
                 "open" => {
-                    window.set_visible(true);
-                    window.set_minimized(false);
-                    window.set_focus();
+                    bring_up();
+                    if screen == Screen::App
+                        && url.is_some()
+                        && let Some(r) = offer_due(&offer, &later)
+                    {
+                        let _ = webview.load_html(&offer_page(&r, replaceable));
+                        screen = Screen::Offer;
+                    }
                 }
                 "browser" => {
                     if let Some(u) = &url {
@@ -296,6 +591,18 @@ pub fn run() {
                         tracing::warn!(error = %e, "could not change the start-with-Windows setting");
                     }
                     autostart_item.set_checked(autostart_enabled());
+                }
+                "update" if screen == Screen::App && url.is_some() => {
+                    if update::current().is_some() {
+                        // The answer always gets a page, also "this is the latest".
+                        later = None;
+                        let _ = ask_check.send(true);
+                    } else {
+                        let body = "<p>這是自己編譯的開發版本，沒有版本號，所以不會檢查更新。</p>";
+                        let _ = webview.load_html(&dialog("開發版本", body, &[("update:back", "返回", true)]));
+                        screen = Screen::Notice;
+                        bring_up();
+                    }
                 }
                 "quit" => quit(),
                 _ => {}

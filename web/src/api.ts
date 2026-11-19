@@ -300,6 +300,8 @@ export interface SystemInfo {
   local_agents?: boolean
   /** The workspace has a decision model that can be called; until then the app shows only its setup. */
   decider_ready?: boolean
+  /** The release the server was built from (e.g. `v0.6.0`); null for a development build. */
+  version?: string | null
 }
 
 export const api2 = {
@@ -460,6 +462,9 @@ export interface LocalProject {
 export interface LocalWork {
   id: string
   agent_handle: string
+  conversation_id: string
+  /** False when the conversation has been bound to another folder since; the work still belongs to `project`. */
+  current_folder: boolean
   conversation_name: string
   thread_root_id: string | null
   project: string

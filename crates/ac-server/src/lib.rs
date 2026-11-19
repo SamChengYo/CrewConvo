@@ -19,6 +19,13 @@ mod ws;
 pub use config::{Edition, ProviderSpec, ServerConfig};
 pub use launch::serve_from_env;
 
+/// The release this program was built from: `CREWCONVO_VERSION` at build time (the release
+/// workflow passes the tag, e.g. `v0.6.0`). None for a build made without it — a development
+/// build, which does not know what it is and therefore never offers updates.
+pub fn version() -> Option<&'static str> {
+    option_env!("CREWCONVO_VERSION").map(str::trim).filter(|v| !v.is_empty())
+}
+
 use std::sync::Arc;
 
 use ac_context::{ContextAssembler, ContextBudget, Summarizer};
@@ -159,7 +166,11 @@ pub async fn build_with_sandbox(
     }
     let local = config.local_agents.then(|| {
         let server = local::local_url(&config.bind);
-        local::LocalAgents::new(service.clone(), &config.data_dir, server, config.local_sessions_reuse)
+        let opts = local::platforms::RunOptions {
+            live: config.local_live_messages,
+            codex_windows_sandbox: config.local_codex_windows_sandbox.clone(),
+        };
+        local::LocalAgents::new(service.clone(), &config.data_dir, server, config.local_sessions_reuse, opts)
     });
     if config.manage_existing
         && let Some(l) = &local

@@ -24,6 +24,28 @@ pub struct Invocation {
     pub stdin: Option<String>,
     /// Standard output is a stream of JSON events (Codex `--json`), not the agent's final text.
     pub json_events: bool,
+    /// The tool stays in a conversation with us for the whole run, so messages that arrive
+    /// while it works can be handed to it. None: it gets the prompt, runs, and exits.
+    pub live: Option<Live>,
+}
+
+/// How to talk to a tool that takes more input while it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Live {
+    /// Claude Code `--input-format stream-json`: each user message is one JSON line on stdin.
+    ClaudeStream,
+    /// `codex app-server`: JSON-RPC on stdin/stdout (`thread/start`, `turn/start`, `turn/steer`).
+    CodexServer { sandbox: &'static str, resume: Option<String> },
+}
+
+/// Settings of this server that change how the tools are started.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// Use the live protocols where there is one (`LOCAL_LIVE_MESSAGES`, default on).
+    pub live: bool,
+    /// `[windows] sandbox` to run Codex with instead of what its own config says
+    /// (`LOCAL_CODEX_WINDOWS_SANDBOX`); None leaves Codex's choice alone.
+    pub codex_windows_sandbox: Option<String>,
 }
 
 /// Which session of the tool a wake runs in.
@@ -825,9 +847,54 @@ impl Platform {
         tools: &[String],
         session: SessionArg<'_>,
         access: Access,
+        opts: &RunOptions,
     ) -> Option<Invocation> {
         let program = self.runner()?;
-        Some(self.invocation_with(program, prompt, tools, session, access))
+        let mut inv = self.invocation_with(program, prompt, tools, session, access);
+        if opts.live {
+            self.make_live(&mut inv, session, access);
+        }
+        if self == Platform::Codex
+            && let Some(mode) = &opts.codex_windows_sandbox
+        {
+            // Right after the subcommand (`exec` / `app-server`), where both take `-c`.
+            inv.args.splice(1..1, ["-c".to_string(), format!("windows.sandbox={mode}")]);
+        }
+        Some(inv)
+    }
+
+    /// Switches an invocation to the protocol that keeps the tool listening while it works.
+    /// Does nothing for tools that have none.
+    fn make_live(self, inv: &mut Invocation, session: SessionArg<'_>, access: Access) {
+        match self {
+            Platform::ClaudeCode => {
+                // `--verbose` is required by Claude Code for stream-json output with `-p`.
+                let Some(i) = inv.args.iter().position(|a| a == "--output-format") else { return };
+                inv.args.splice(
+                    i..i + 2,
+                    ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"].map(String::from),
+                );
+                inv.live = Some(Live::ClaudeStream);
+            }
+            Platform::Codex => {
+                // `codex exec` cannot be told anything once it runs; the app server can. The
+                // sandbox and the session go into its requests instead of the command line.
+                let mut args = vec!["app-server".to_string()];
+                if access == Access::Full {
+                    args.extend(["-c", "sandbox_workspace_write.network_access=true"].map(String::from));
+                }
+                inv.args = args;
+                inv.json_events = false;
+                inv.live = Some(Live::CodexServer {
+                    sandbox: if access.writes() { "workspace-write" } else { "read-only" },
+                    resume: match session {
+                        SessionArg::Resume(id) => Some(id.to_string()),
+                        _ => None,
+                    },
+                });
+            }
+            _ => {}
+        }
     }
 
     fn invocation_with(
@@ -903,7 +970,7 @@ impl Platform {
             Platform::Antigravity => (s(&["-p", &as_arg(), "--output-format", "text"]), None),
         };
         let json_events = self == Platform::Codex && session != SessionArg::Unrecorded;
-        Invocation { program, args, stdin, json_events }
+        Invocation { program, args, stdin, json_events, live: None }
     }
 }
 
@@ -939,6 +1006,44 @@ mod tests {
     fn args(p: Platform, session: SessionArg<'_>, access: Access) -> Vec<String> {
         let tools = vec!["post_message".to_string(), "react".to_string()];
         p.invocation_with(PathBuf::from("tool"), "prompt", &tools, session, access).args
+    }
+
+    #[test]
+    fn live_protocols_keep_the_access_flags_and_the_session() {
+        let tools = vec!["post_message".to_string()];
+        let mut c = Platform::ClaudeCode.invocation_with(
+            PathBuf::from("claude"),
+            "p",
+            &tools,
+            SessionArg::Resume("s-1"),
+            Access::Edit,
+        );
+        Platform::ClaudeCode.make_live(&mut c, SessionArg::Resume("s-1"), Access::Edit);
+        assert_eq!(c.live, Some(Live::ClaudeStream));
+        assert_eq!(value_of(&c.args, "--input-format"), Some("stream-json"));
+        assert_eq!(value_of(&c.args, "--output-format"), Some("stream-json"));
+        assert!(c.args.contains(&"--verbose".to_string()) && !c.args.contains(&"text".to_string()));
+        assert_eq!(value_of(&c.args, "--permission-mode"), Some("acceptEdits"));
+        assert_eq!(value_of(&c.args, "--disallowedTools"), Some("Bash"));
+        assert_eq!(value_of(&c.args, "--resume"), Some("s-1"));
+
+        let mut x =
+            Platform::Codex.invocation_with(PathBuf::from("codex"), "p", &tools, SessionArg::Resume("t-1"), Access::Full);
+        Platform::Codex.make_live(&mut x, SessionArg::Resume("t-1"), Access::Full);
+        assert_eq!(x.args, ["app-server", "-c", "sandbox_workspace_write.network_access=true"]);
+        assert_eq!(x.live, Some(Live::CodexServer { sandbox: "workspace-write", resume: Some("t-1".into()) }));
+        assert!(!x.json_events && x.stdin.as_deref() == Some("p"));
+
+        let mut r = Platform::Codex.invocation_with(PathBuf::from("codex"), "p", &tools, SessionArg::New("n"), Access::Read);
+        Platform::Codex.make_live(&mut r, SessionArg::New("n"), Access::Read);
+        assert_eq!(r.args, ["app-server"]);
+        assert_eq!(r.live, Some(Live::CodexServer { sandbox: "read-only", resume: None }));
+
+        // Tools without such a protocol run as before.
+        let mut o = Platform::OpenCode.invocation_with(PathBuf::from("o"), "p", &tools, SessionArg::Unrecorded, Access::Read);
+        let before = o.args.clone();
+        Platform::OpenCode.make_live(&mut o, SessionArg::Unrecorded, Access::Read);
+        assert!(o.live.is_none() && o.args == before);
     }
 
     fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
