@@ -312,6 +312,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn two_conversations_of_one_project_have_their_own_working_copies() {
+        let dir = std::env::temp_dir().join(format!("cc-work-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let works = Works::load(&dir);
+        let (agent, first, second, thread) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3), Uuid::from_u128(4));
+        let rec = |id: &str, conversation: Uuid, thread: Option<Uuid>| WorkRecord {
+            id: id.into(),
+            agent_id: agent,
+            agent_handle: "codex".into(),
+            conversation_id: conversation,
+            conversation_name: "#shop".into(),
+            thread_root_id: thread,
+            project: "/work/shop".into(),
+            worktree: format!("/work/shop/.crewconvo/worktrees/codex-{id}"),
+            branch: format!("crewconvo/codex-{id}"),
+            base_commit: "abc".into(),
+            base_branch: Some("main".into()),
+            created_at: Utc::now(),
+            last_used_at: Utc::now(),
+            ahead: 0,
+        };
+        works.add(rec("aaaa1111", first, None));
+        works.add(rec("bbbb2222", second, None));
+        works.add(rec("cccc3333", first, Some(thread)));
+        // Same agent, same folder: each conversation (and each thread) finds only its own.
+        let found = |c: Uuid, t: Option<Uuid>| works.find(agent, c, t, "/work/shop").map(|r| r.id);
+        assert_eq!(found(first, None).as_deref(), Some("aaaa1111"));
+        assert_eq!(found(second, None).as_deref(), Some("bbbb2222"));
+        assert_eq!(found(first, Some(thread)).as_deref(), Some("cccc3333"));
+        assert_eq!(found(second, Some(thread)), None);
+        // The same conversation bound to another folder has none there.
+        assert!(works.find(agent, first, None, "/work/other").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn worktree_and_branch_names() {
         assert_eq!(names("codex", "3f9a1c2e-77aa-4b11"), ("codex-3f9a1c2e".into(), "crewconvo/codex-3f9a1c2e".into()));
         // Handles are free text; what goes into a path and a branch name is not.

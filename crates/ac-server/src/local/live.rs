@@ -45,6 +45,8 @@ pub(super) struct LiveRun<'a> {
     /// What this run may do; a message that would deserve more is not handed to it.
     pub access: Access,
     pub configured: Access,
+    /// The thinking depth this run was started with, if one is set.
+    pub effort: Option<&'a str>,
 }
 
 /// Wakes taken out of the queue for one hand-over, with the newest message each one covers.
@@ -174,6 +176,8 @@ pub(super) enum ClaudeEvent {
     TookInput,
     /// A turn began or goes on.
     Working,
+    /// A turn began; Claude Code says which model it runs on.
+    Began(String),
     /// The turn is over; `text` is what it said last.
     Result { text: String, is_error: bool },
     Other,
@@ -184,7 +188,10 @@ pub(super) fn claude_event(line: &str) -> ClaudeEvent {
     match v["type"].as_str().unwrap_or_default() {
         "user" if v["isReplay"] == true => ClaudeEvent::TookInput,
         "assistant" => ClaudeEvent::Working,
-        "system" if v["subtype"] == "init" => ClaudeEvent::Working,
+        "system" if v["subtype"] == "init" => match v["model"].as_str() {
+            Some(m) => ClaudeEvent::Began(m.to_string()),
+            None => ClaudeEvent::Working,
+        },
         "result" => ClaudeEvent::Result {
             text: v["result"].as_str().unwrap_or_default().to_string(),
             is_error: v["is_error"] == true,
@@ -220,7 +227,9 @@ fn drain(stderr: Option<tokio::process::ChildStderr>) -> tokio::task::JoinHandle
 pub(super) async fn run(ctx: &LiveRun<'_>, inv: Invocation) -> Run {
     match inv.live.clone() {
         Some(Live::ClaudeStream) => run_claude(ctx, inv).await,
-        Some(Live::CodexServer { sandbox, resume }) => run_codex(ctx, inv, sandbox, resume).await,
+        Some(Live::CodexServer { sandbox, resume, model, effort }) => {
+            run_codex(ctx, inv, sandbox, resume, model, effort).await
+        }
         None => Run::Broken("not a live invocation".into()),
     }
 }
@@ -265,6 +274,10 @@ async fn run_claude(ctx: &LiveRun<'_>, mut inv: Invocation) -> Run {
                         }
                     }
                     ClaudeEvent::Working => close_at = None,
+                    ClaudeEvent::Began(model) => {
+                        close_at = None;
+                        ctx.inner.note_model(ctx.local.agent_id, &model, ctx.effort);
+                    }
                     ClaudeEvent::Result { text, is_error } => {
                         last = Some((text, is_error));
                         // A message it has not taken yet starts another turn; otherwise it is
@@ -385,7 +398,14 @@ const INIT: u64 = 1;
 const THREAD: u64 = 2;
 const TURN: u64 = 3;
 
-async fn run_codex(ctx: &LiveRun<'_>, inv: Invocation, sandbox: &str, resume: Option<String>) -> Run {
+async fn run_codex(
+    ctx: &LiveRun<'_>,
+    inv: Invocation,
+    sandbox: &str,
+    resume: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Run {
     let mut child = match ctx.command(&inv).spawn() {
         Ok(c) => c,
         Err(e) => return Run::NotStarted(format!("無法啟動 {}：{e}", inv.program.display())),
@@ -426,6 +446,10 @@ async fn run_codex(ctx: &LiveRun<'_>, inv: Invocation, sandbox: &str, resume: Op
                     CodexEvent::Reply { id: INIT, error: None, .. } => {
                         // Never ask: nobody is there to answer, and the sandbox is the limit.
                         let mut params = json!({ "cwd": dir, "sandbox": sandbox, "approvalPolicy": "never" });
+                        // Left out, Codex uses its own default (a resumed session: what it used last).
+                        if let Some(m) = &model {
+                            params["model"] = json!(m);
+                        }
                         let method = match &resume {
                             Some(id) => {
                                 params["threadId"] = json!(id);
@@ -444,7 +468,14 @@ async fn run_codex(ctx: &LiveRun<'_>, inv: Invocation, sandbox: &str, resume: Op
                             errors.push("codex did not open a session".into());
                             break None;
                         };
-                        let params = json!({ "threadId": id, "input": [{ "type": "text", "text": prompt }] });
+                        // It answers with the model the session really runs on.
+                        if let Some(m) = r["model"].as_str() {
+                            ctx.inner.note_model(ctx.local.agent_id, m, r["reasoningEffort"].as_str().or(effort.as_deref()));
+                        }
+                        let mut params = json!({ "threadId": id, "input": [{ "type": "text", "text": prompt }] });
+                        if let Some(e) = &effort {
+                            params["effort"] = json!(e);
+                        }
                         write(&mut stdin, &rpc(TURN, "turn/start", params)).await;
                     }
                     // The turn was accepted; what it does arrives as notifications.
@@ -603,6 +634,10 @@ mod tests {
     #[test]
     fn reads_claude_code_stream_events() {
         assert_eq!(claude_event(r#"{"type":"system","subtype":"init","session_id":"s"}"#), ClaudeEvent::Working);
+        assert_eq!(
+            claude_event(r#"{"type":"system","subtype":"init","model":"claude-sonnet-5-5"}"#),
+            ClaudeEvent::Began("claude-sonnet-5-5".into())
+        );
         assert_eq!(claude_event(r#"{"type":"assistant","message":{"content":[]}}"#), ClaudeEvent::Working);
         assert_eq!(
             claude_event(r#"{"type":"user","message":{"role":"user","content":[]},"isReplay":true}"#),

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, api2, ApiError, localApi, type Agent, type ConversationItem, type Member } from './api'
+import { api, api2, ApiError, localApi, type Agent, type ConversationItem, type LocalProject, type Member } from './api'
+import type { ProjectGroup } from './components/CodingSection'
+import { NewProjectModal, NewProjectConversationModal } from './components/ProjectModals'
 import { realtime, useRealtime } from './realtime'
 import Login from './components/Login'
 import Sidebar from './components/Sidebar'
@@ -16,7 +18,7 @@ import LocalAgentsPage from './components/LocalAgentsPage'
 import { NewChannelModal, NewDmModal, BrowseChannelsModal } from './components/Modals'
 
 type View = { kind: 'conversation'; id: string } | { kind: 'agents' } | { kind: 'deciders' } | { kind: 'activity' } | { kind: 'groups' } | { kind: 'local' } | { kind: 'connect'; code: string } | { kind: 'empty' }
-type ModalKind = 'channel' | 'dm' | 'browse' | null
+type ModalKind = 'channel' | 'dm' | 'browse' | 'project' | { project: ProjectGroup } | null
 
 export default function App() {
   const [me, setMe] = useState<Member | null | undefined>(undefined)
@@ -96,6 +98,8 @@ function Workspace({ me, onLogout, onDecidersChanged }: { me: Member; onLogout: 
   const [search, setSearch] = useState<string | null>(null)
   const [edition, setEdition] = useState<'personal' | 'enterprise'>('enterprise')
   const [localAgents, setLocalAgents] = useState(false)
+  // Conversations of coding agents and the project folder of each (empty when the server has no local agents).
+  const [coding, setCoding] = useState<LocalProject[]>([])
 
   useEffect(() => {
     api2
@@ -118,6 +122,11 @@ function Workspace({ me, onLogout, onDecidersChanged }: { me: Member; onLogout: 
   const reload = useCallback(async () => {
     try {
       const [c, m, a] = await Promise.all([api.conversations(), api.members(), api.agents()])
+      // 404 on servers without local coding agents: no such section then.
+      localApi
+        .projects()
+        .then((r) => setCoding(r.projects))
+        .catch(() => setCoding([]))
       setConvs(c)
       setMembers(m)
       setAgents(a)
@@ -200,6 +209,31 @@ function Workspace({ me, onLogout, onDecidersChanged }: { me: Member; onLogout: 
     onLogout()
   }
 
+  const renameCoding = async (row: LocalProject) => {
+    const current = row.name.replace(/^#/, '')
+    const name = prompt('對話的新名稱（不能有空白、@ 或 #）', current)
+    if (name === null || !name.trim() || name.trim() === current) return
+    try {
+      await localApi.renameConversation(row.conversation_id, name.trim())
+      await reload()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const archiveCoding = async (row: LocalProject) => {
+    if (!confirm(`要封存 ${row.name} 嗎？\n它會從側邊欄消失，也不能再發訊息；訊息紀錄和還沒合併的工作成果都不會被刪除。`)) return
+    try {
+      await localApi.archiveConversation(row.conversation_id)
+      if (view.kind === 'conversation' && view.id === row.conversation_id) setView({ kind: 'empty' })
+      await reload()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const projectOf = (id: string) => coding.find((r) => r.conversation_id === id)
+
   return (
     <div className="app">
       <TopBar me={me} onSearch={setSearch} onLogout={logout} />
@@ -218,6 +252,11 @@ function Workspace({ me, onLogout, onDecidersChanged }: { me: Member; onLogout: 
           onActivity={() => setView({ kind: 'activity' })}
           onGroups={() => setView({ kind: 'groups' })}
           onLocal={localAgents ? () => setView({ kind: 'local' }) : undefined}
+          coding={coding}
+          onNewProject={() => setModal('project')}
+          onNewProjectConversation={(project) => setModal({ project })}
+          onRenameCoding={renameCoding}
+          onArchiveCoding={archiveCoding}
           onNewChannel={() => setModal('channel')}
           onNewDm={() => setModal('dm')}
           onBrowse={() => setModal('browse')}
@@ -233,6 +272,7 @@ function Workspace({ me, onLogout, onDecidersChanged }: { me: Member; onLogout: 
               key={view.id}
               me={me}
               conversationId={view.id}
+              project={projectOf(view.id)}
               members={members}
               agents={agents}
               onRead={markRead}
@@ -293,6 +333,27 @@ function Workspace({ me, onLogout, onDecidersChanged }: { me: Member; onLogout: 
             setModal(null)
             await reload()
             setView({ kind: 'conversation', id: c.id })
+          }}
+        />
+      )}
+      {modal === 'project' && (
+        <NewProjectModal
+          onClose={() => setModal(null)}
+          onCreated={async (id) => {
+            setModal(null)
+            await reload()
+            setView({ kind: 'conversation', id })
+          }}
+        />
+      )}
+      {modal !== null && typeof modal === 'object' && (
+        <NewProjectConversationModal
+          project={modal.project}
+          onClose={() => setModal(null)}
+          onCreated={async (id) => {
+            setModal(null)
+            await reload()
+            setView({ kind: 'conversation', id })
           }}
         />
       )}

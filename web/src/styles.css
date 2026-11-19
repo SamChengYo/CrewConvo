@@ -2421,3 +2421,88 @@ label.row {
 .local-project-name .pill:not(.good):not(.warn) {
   background: var(--border-soft);
 }
+
+/* Coding Agent section of the sidebar: projects, and their conversations indented below */
+.sb-project {
+  margin-top: 2px;
+}
+.sb-project > .sb-section-head {
+  padding-left: 18px;
+}
+.sb-project > .sb-section-head .sb-caret {
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+}
+.sb-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+.sb-project-name.unassigned {
+  font-weight: 400;
+  opacity: 0.8;
+}
+.sb-item.sb-child {
+  padding: 0 4px 0 0;
+  margin-left: 26px;
+  width: calc(100% - 34px);
+}
+.sb-child-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 0 0 12px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.sb-child-actions {
+  display: none;
+  flex: none;
+}
+.sb-child:hover .sb-child-actions,
+.sb-child:focus-within .sb-child-actions {
+  display: flex;
+}
+.sb-child-actions button {
+  color: inherit;
+  opacity: 0.75;
+  padding: 0 5px;
+  font-size: 12px;
+  border-radius: 4px;
+}
+.sb-child-actions button:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.15);
+}
+.conv-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  min-width: 0;
+}
+.conv-project.muted {
+  color: var(--muted);
+}
+.conv-project-path {
+  color: var(--muted);
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 340px;
+}
+.local-depth {
+  flex: 0 0 200px !important;
+}

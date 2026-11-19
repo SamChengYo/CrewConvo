@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { Agent, ConversationItem, Member } from '../api'
+import type { Agent, ConversationItem, LocalProject, Member } from '../api'
+import CodingSection, { type ProjectGroup } from './CodingSection'
 import { Avatar } from './Avatar'
 
 interface Props {
@@ -11,6 +12,12 @@ interface Props {
   page: 'agents' | 'deciders' | 'activity' | 'groups' | 'local' | null
   /** Present when the server can set up the coding agents on the computer it runs on. */
   onLocal?: () => void
+  /** Conversations of coding agents with their project folders; they get their own section. */
+  coding: LocalProject[]
+  onNewProject: () => void
+  onNewProjectConversation: (project: ProjectGroup) => void
+  onRenameCoding: (row: LocalProject) => void
+  onArchiveCoding: (row: LocalProject) => void
   onOpen: (id: string) => void
   onOpenAgent: (agentId: string) => void
   onAgents: () => void
@@ -47,8 +54,10 @@ function Section({ title, children, onAdd, addTitle }: { title: string; children
 }
 
 export default function Sidebar(p: Props) {
-  const channels = p.convs.filter((c) => c.kind === 'channel')
-  const dms = p.convs.filter((c) => c.kind === 'dm')
+  // What is listed under "Coding Agent" is not listed again among the channels and direct messages.
+  const inCoding = new Set(p.onLocal ? p.coding.map((r) => r.conversation_id) : [])
+  const channels = p.convs.filter((c) => c.kind === 'channel' && !inCoding.has(c.id))
+  const dms = p.convs.filter((c) => c.kind === 'dm' && !inCoding.has(c.id))
   const unread = (c: ConversationItem) => c.last_other_seq > c.last_read_seq && c.id !== p.activeId
 
   return (
@@ -92,6 +101,19 @@ export default function Sidebar(p: Props) {
             <span className="sb-label">瀏覽頻道</span>
           </button>
         </div>
+
+        {p.onLocal && (
+          <CodingSection
+            rows={p.coding}
+            convs={p.convs}
+            activeId={p.activeId}
+            onOpen={p.onOpen}
+            onNewProject={p.onNewProject}
+            onNewConversation={p.onNewProjectConversation}
+            onRename={p.onRenameCoding}
+            onArchive={p.onArchiveCoding}
+          />
+        )}
 
         <Section title="頻道" onAdd={p.onNewChannel} addTitle="建立頻道">
           {channels.map((c) => (

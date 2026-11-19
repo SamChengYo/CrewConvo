@@ -42,7 +42,7 @@ use crate::AppState;
 use crate::error::{ApiError, ApiResult};
 use crate::session::CurrentMember;
 use access::{Access, Downgrade, ProjectState, Trigger};
-use platforms::{Platform, Readiness, RunOptions, SessionArg, Status};
+use platforms::{ModelChoice, Platform, Readiness, Rejected, RunOptions, SessionArg, Status, Tuning};
 use projects::Projects;
 use sessions::{SessionRecord, Sessions};
 use work::{WorkRecord, Works};
@@ -75,6 +75,18 @@ struct LocalAgent {
     /// What it may do to files when its owner asks; agents connected before this existed read only.
     #[serde(default)]
     access: Access,
+    /// The model it runs with; None: the tool's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// How hard it thinks (the tool's own word for it, e.g. `high`); None: the tool's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+}
+
+impl LocalAgent {
+    fn tuning(&self) -> Tuning {
+        Tuning::new(self.model.as_deref(), self.effort.as_deref())
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -111,6 +123,29 @@ struct Inner {
     git_admin: tokio::sync::Mutex<()>,
     /// Whether each coding agent can be woken, and when that was last checked.
     readiness: Mutex<HashMap<&'static str, (Instant, Status)>>,
+    /// The models each tool lists for the signed-in user, and when that was asked.
+    model_lists: Mutex<HashMap<&'static str, (Instant, Vec<ModelChoice>)>>,
+    /// What each agent's tool said it actually ran on, the last time it said so (model, depth).
+    used: Mutex<HashMap<Uuid, (String, Option<String>)>>,
+}
+
+/// How long a tool's list of models is kept before it is asked again.
+const MODELS_TTL: Duration = Duration::from_secs(600);
+
+/// The models a tool lists (Codex: its catalog). Empty for tools that cannot list any.
+async fn model_list(inner: &Inner, p: Platform, fresh: bool) -> Vec<ModelChoice> {
+    if !p.tunable() {
+        return vec![];
+    }
+    if !fresh
+        && let Some((at, list)) = inner.model_lists.lock().unwrap().get(p.id())
+        && at.elapsed() < MODELS_TTL
+    {
+        return list.clone();
+    }
+    let list = tokio::task::spawn_blocking(move || p.models()).await.unwrap_or_default();
+    inner.model_lists.lock().unwrap().insert(p.id(), (Instant::now(), list.clone()));
+    list
 }
 
 /// One run in progress.
@@ -180,6 +215,11 @@ impl Inner {
         dir
     }
 
+    /// Remembers what a tool reported it runs on, for the page to show.
+    fn note_model(&self, agent_id: Uuid, model: &str, effort: Option<&str>) {
+        self.used.lock().unwrap().insert(agent_id, (model.to_string(), effort.map(str::to_string)));
+    }
+
     /// The agent as it is now (its access level can be changed while its worker runs).
     fn current(&self, agent_id: Uuid) -> Option<LocalAgent> {
         self.agents.lock().unwrap().iter().find(|a| a.agent_id == agent_id).cloned()
@@ -224,6 +264,15 @@ pub struct RoleInput {
     pub access: Option<Access>,
 }
 
+/// Model and thinking depth of one coding agent; a missing or empty value means the tool's default.
+#[derive(Debug, Default, Deserialize)]
+pub struct TuningInput {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AccessInput {
     pub access: Access,
@@ -232,6 +281,30 @@ pub struct AccessInput {
 #[derive(Debug, Deserialize)]
 pub struct ProjectInput {
     pub path: String,
+}
+
+/// A new conversation in the project that is this folder.
+#[derive(Debug, Default, Deserialize)]
+pub struct NewProjectInput {
+    pub path: String,
+    /// What to call the project; default: the folder's name (or what it is called already).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// What to call the conversation; default: made from the project's name.
+    #[serde(default)]
+    pub conversation_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectNameInput {
+    pub path: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameInput {
+    pub name: String,
 }
 
 impl RoleInput {
@@ -301,8 +374,38 @@ impl LocalAgents {
                 opts,
                 git_admin: tokio::sync::Mutex::new(()),
                 readiness: Mutex::new(HashMap::new()),
+                model_lists: Mutex::new(HashMap::new()),
+                used: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// Sets which model a connected coding agent runs with and how hard it thinks; empty
+    /// values go back to the tool's own defaults. Nothing is checked here: the tool decides
+    /// what is valid, and a refused value is reported where the agent was asked.
+    pub fn set_tuning(&self, platform: &str, input: &TuningInput) -> AppResult<Value> {
+        let p = platforms::by_id(platform).ok_or_else(|| AppError::not_found("coding agent"))?;
+        let tuning = Tuning::new(input.model.as_deref(), input.effort.as_deref());
+        if !p.tunable() && tuning != Tuning::default() {
+            return Err(AppError::bad_request(format!("{} 目前不支援指定模型或思考深度", p.name())));
+        }
+        if tuning.model.as_ref().is_some_and(|m| m.chars().count() > 120 || m.chars().any(char::is_whitespace)) {
+            return Err(AppError::bad_request("模型名稱不能有空白，也不能超過 120 個字元"));
+        }
+        if tuning.effort.as_ref().is_some_and(|e| e.chars().count() > 40 || !e.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+            return Err(AppError::bad_request("思考深度只能是英數字（例如 high）"));
+        }
+        {
+            let mut agents = self.inner.agents.lock().unwrap();
+            let agent = agents.iter_mut().find(|a| a.platform == p.id());
+            let agent = agent.ok_or_else(|| AppError::not_found("這個 Coding Agent 還沒有加入"))?;
+            agent.model = tuning.model.clone();
+            agent.effort = tuning.effort.clone();
+            // What it ran on before says nothing about what it will run on now.
+            self.inner.used.lock().unwrap().remove(&agent.agent_id);
+        }
+        self.save();
+        Ok(json!({ "model": tuning.model, "effort": tuning.effort }))
     }
 
     /// Sets what a connected coding agent may do to files when its owner asks.
@@ -336,7 +439,8 @@ impl LocalAgents {
                 .map(|m| m.handle.as_str())
                 .collect();
             let path = bound.get(&c.id);
-            if agents.is_empty() && path.is_none() {
+            let is_channel = c.kind == ConversationKind::Channel;
+            if !projects::in_coding_section(is_channel, c.name.as_deref(), !agents.is_empty(), path.is_some()) {
                 continue;
             }
             let name = match c.name.as_deref().filter(|n| !n.is_empty() && c.kind == ConversationKind::Channel) {
@@ -355,14 +459,131 @@ impl LocalAgents {
             rows.push(json!({
                 "conversation_id": c.id,
                 "name": name,
+                "is_channel": is_channel,
                 "agents": agents,
                 "path": path,
+                // Conversations with the same folder are one project; this is what it is called.
+                "project_name": path.map(|p| self.inner.projects.name_of(p)),
                 "exists": dir.is_some_and(|d| d.is_dir()),
                 // Looked at, not asked of git: this is shown on a page that refreshes itself.
                 "is_git": dir.is_some_and(|d| d.join(".git").exists()),
+                "catch_all": dir.is_some_and(|d| projects::catch_all(d, &platforms::home_dir())),
             }));
         }
         Ok(json!({ "projects": rows }))
+    }
+
+    /// The coding agents connected on this computer that still exist.
+    async fn connected_agents(&self) -> Vec<Uuid> {
+        let mut ids = Vec::new();
+        for a in self.snapshot() {
+            if let Ok(Some(r)) = self.inner.service.store().get_agent(a.agent_id).await
+                && r.member.deactivated_at.is_none()
+            {
+                ids.push(a.agent_id);
+            }
+        }
+        ids
+    }
+
+    /// Looks at a folder the user is about to make a project of: how it will be written, what
+    /// the project is called, and what they should know first. Changes nothing.
+    pub fn check_project(&self, raw: &str) -> AppResult<Value> {
+        let home = platforms::home_dir();
+        let path = projects::check_path(raw, &home).map_err(AppError::BadRequest)?;
+        let path = self.inner.projects.spelling(&path);
+        let existing = self.inner.projects.all().values().filter(|p| **p == path).count();
+        Ok(json!({
+            "path": path,
+            "project_name": self.inner.projects.name_of(&path),
+            "conversations": existing,
+            "warnings": projects::warnings(std::path::Path::new(&path), &home),
+        }))
+    }
+
+    /// A new conversation in a project: a private channel with every connected coding agent,
+    /// bound to the project's folder. For a folder that is nobody's project yet this is what
+    /// creates the project.
+    pub async fn create_project_conversation(&self, actor: &Member, input: NewProjectInput) -> AppResult<Value> {
+        let home = platforms::home_dir();
+        let path = projects::check_path(&input.path, &home).map_err(AppError::BadRequest)?;
+        let path = self.inner.projects.spelling(&path);
+        let project_name = match clean(&input.name) {
+            Some(n) => n.to_string(),
+            None => self.inner.projects.name_of(&path),
+        };
+        let invite = self.connected_agents().await;
+        if invite.is_empty() {
+            return Err(AppError::bad_request("還沒有加入任何 Coding Agent。請先在「這台電腦的 Coding Agent」頁面安裝至少一個"));
+        }
+        let service = &self.inner.service;
+        // A name the user typed is taken as it is (and refused if taken); a name made up from
+        // the project's gets a number when the plain one is in use.
+        let (base, typed) = match clean(&input.conversation_name) {
+            Some(n) => (n.trim_start_matches('#').to_string(), true),
+            None => (projects::channel_name(&project_name), false),
+        };
+        let mut created = None;
+        for n in 1..=50 {
+            let name = if n == 1 { base.clone() } else { format!("{base}-{n}") };
+            match service.create_channel(actor, &name, None, ac_core::model::Visibility::Private, &invite).await {
+                Ok(c) => {
+                    created = Some(c);
+                    break;
+                }
+                Err(AppError::Conflict(_)) if !typed => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        let conv = created.ok_or_else(|| AppError::Conflict(format!("找不到可用的對話名稱（{base}）")))?;
+        self.inner.projects.set(conv.id, path.clone());
+        if clean(&input.name).is_some() {
+            self.inner.projects.set_name(&path, &project_name);
+        }
+        self.folder_changed(actor, conv.id, None, Some(&path)).await;
+        Ok(json!({
+            "conversation": { "id": conv.id, "name": conv.name },
+            "path": path,
+            "project_name": self.inner.projects.name_of(&path),
+            "warnings": projects::warnings(std::path::Path::new(&path), &home),
+        }))
+    }
+
+    /// Names the project in a folder (an empty name: back to the folder's own name).
+    pub fn rename_project(&self, input: &ProjectNameInput) -> AppResult<Value> {
+        let path = self.inner.projects.spelling(input.path.trim());
+        if !self.inner.projects.all().values().any(|p| *p == path) {
+            return Err(AppError::not_found("專案"));
+        }
+        self.inner.projects.set_name(&path, &input.name);
+        Ok(json!({ "path": path, "project_name": self.inner.projects.name_of(&path) }))
+    }
+
+    pub async fn rename_conversation(&self, actor: &Member, conversation_id: Uuid, name: &str) -> AppResult<Value> {
+        let conv = self.inner.service.rename_channel(actor, conversation_id, name).await?;
+        Ok(json!({ "id": conv.id, "name": conv.name }))
+    }
+
+    /// Takes a conversation out of the sidebar by archiving it: nothing is deleted, and work
+    /// that is not merged yet stays listed. Not while an agent is working in it.
+    pub async fn archive_conversation(&self, actor: &Member, conversation_id: Uuid) -> AppResult<()> {
+        if let Some(who) = self.inner.running_in_conversation(conversation_id) {
+            return Err(AppError::Conflict(format!(
+                "{who} 正在這個對話裡執行，現在不能封存。等它結束，或先在對話裡按「停止」"
+            )));
+        }
+        self.inner.service.archive_channel(actor, conversation_id).await?;
+        self.inner.projects.clear(conversation_id);
+        Ok(())
+    }
+
+    /// Agents connected after projects exist join the conversations of every project, so a
+    /// project's conversations always have all the coding agents of this computer.
+    async fn join_projects(&self, actor: &Member, agents: &[Uuid]) {
+        for conversation_id in self.inner.projects.all().into_keys() {
+            // Not the actor's conversation, a direct message, archived: leave it alone.
+            let _ = self.inner.service.invite(actor, conversation_id, agents).await;
+        }
     }
 
     async fn own_conversation(&self, actor: &Member, conversation_id: Uuid) -> AppResult<()> {
@@ -377,6 +598,7 @@ impl LocalAgents {
     pub async fn set_project(&self, actor: &Member, conversation_id: Uuid, raw: &str) -> AppResult<Value> {
         self.own_conversation(actor, conversation_id).await?;
         let path = projects::check_path(raw, &platforms::home_dir()).map_err(AppError::BadRequest)?;
+        let path = self.inner.projects.spelling(&path);
         let old = self.inner.projects.get(conversation_id).map(|p| p.to_string_lossy().to_string());
         if old.as_deref() != Some(path.as_str()) {
             self.folder_may_change(conversation_id)?;
@@ -384,7 +606,8 @@ impl LocalAgents {
             self.folder_changed(actor, conversation_id, old.as_deref(), Some(&path)).await;
         }
         let is_git = std::path::Path::new(&path).join(".git").exists();
-        Ok(json!({ "path": path, "exists": true, "is_git": is_git }))
+        let warnings = projects::warnings(std::path::Path::new(&path), &platforms::home_dir());
+        Ok(json!({ "path": path, "exists": true, "is_git": is_git, "warnings": warnings }))
     }
 
     pub async fn clear_project(&self, actor: &Member, conversation_id: Uuid) -> AppResult<()> {
@@ -617,6 +840,11 @@ impl LocalAgents {
                         "description": r.description,
                         "expertise": r.expertise,
                         "access": a.access,
+                        "model": a.model,
+                        "effort": a.effort,
+                        // What the tool itself last said it ran on (it resolves aliases and defaults).
+                        "used_model": self.inner.used.lock().unwrap().get(&a.agent_id).map(|u| u.0.clone()),
+                        "used_effort": self.inner.used.lock().unwrap().get(&a.agent_id).and_then(|u| u.1.clone()),
                     });
                 }
             }
@@ -630,6 +858,12 @@ impl LocalAgents {
                 "explanation": status.as_ref().map(|s| s.explanation.as_str()).unwrap_or_default(),
                 "login_command": status.as_ref().and_then(|s| s.login_command.as_deref()),
                 "limits_access": p.limits_access(),
+                // Model and thinking depth: whether they can be chosen, the depths the tool
+                // accepts, and the models it lists (or, when it cannot list any, names to suggest).
+                "tunable": p.tunable(),
+                "efforts": p.efforts(),
+                "models": if detected { model_list(&self.inner, p, refresh).await } else { vec![] },
+                "model_hints": p.model_hints(),
                 "default_role": default_description(p),
                 "keeps_sessions": p.keeps_sessions(),
                 "agent": agent,
@@ -721,6 +955,8 @@ impl LocalAgents {
         for (id, update) in updates {
             service.update_agent(actor, id, update).await?;
         }
+        let joined: Vec<Uuid> = issued.iter().map(|a| a.agent_id).collect();
+        self.join_projects(actor, &joined).await;
 
         let mut results = Vec::new();
         for a in issued {
@@ -734,12 +970,17 @@ impl LocalAgents {
             let asked = input.roles.get(p.id()).and_then(|r| r.access);
             let before = known.iter().find(|x| x.platform == p.id()).map(|x| x.access);
             let access = if p.limits_access() { asked.or(before).unwrap_or_default() } else { Access::Read };
+            // The model and thinking depth are settings of the tool on this computer: a
+            // reinstall keeps them.
+            let previous = known.iter().find(|x| x.platform == p.id());
             let local = LocalAgent {
                 platform: p.id().to_string(),
                 agent_id: a.agent_id,
                 handle: a.handle.clone(),
                 token: a.token,
                 access,
+                model: previous.and_then(|x| x.model.clone()),
+                effort: previous.and_then(|x| x.effort.clone()),
             };
             {
                 let mut agents = self.inner.agents.lock().unwrap();
@@ -1115,7 +1356,10 @@ async fn handle_wake(inner: &Inner, local: &LocalAgent, replier: AgentReplier, p
         Some(a) => trigger_of(inner, &payload, a).await,
         None => Trigger { handle: None, is_owner: false },
     };
-    let configured = inner.current(local.agent_id).map(|a| a.access).unwrap_or_default();
+    let current = inner.current(local.agent_id);
+    let configured = current.as_ref().map(|a| a.access).unwrap_or_default();
+    // Read on every wake like the rest: a changed model applies to the next run.
+    let tuning = current.as_ref().map(LocalAgent::tuning).unwrap_or_default();
     let place = place_for(inner, local, &payload, platform, configured, &trigger).await;
     // Sessions are only continued in the folder they were made in. (Records without a
     // folder are from when wakes ran in the home folder; nothing runs there any more.)
@@ -1176,7 +1420,7 @@ async fn handle_wake(inner: &Inner, local: &LocalAgent, replier: AgentReplier, p
             None if recorded => SessionArg::New(&new_id),
             None => SessionArg::Unrecorded,
         };
-        let Some(inv) = platform.and_then(|p| p.invocation(&prompt, &tools, arg, place.access, &inner.opts)) else {
+        let Some(inv) = platform.and_then(|p| p.invocation(&prompt, &tools, arg, place.access, &inner.opts, &tuning)) else {
             tracing::warn!(agent = %local.handle, "no command-line program for this coding agent; wake not handled");
             let name = platform.map(|p| p.name()).unwrap_or("這個 Coding Agent");
             let why =
@@ -1190,6 +1434,7 @@ async fn handle_wake(inner: &Inner, local: &LocalAgent, replier: AgentReplier, p
             agent = %local.handle, wake = %wake_id, reason = ?payload.reason,
             session = match arg { SessionArg::Resume(_) => "resume", SessionArg::New(_) => "new", _ => "unrecorded" },
             access = ?place.access, dir = %place.dir.display(), live = inv.live.is_some(),
+            model = tuning.model.as_deref().unwrap_or("default"), effort = tuning.effort.as_deref().unwrap_or("default"),
             "wake → {}", local.platform
         );
         let run = match (inv.live.is_some(), platform) {
@@ -1206,6 +1451,7 @@ async fn handle_wake(inner: &Inner, local: &LocalAgent, replier: AgentReplier, p
                     cancel: &cancel,
                     access: place.access,
                     configured,
+                    effort: tuning.effort.as_deref(),
                 };
                 live::run(&ctx, inv).await
             }
@@ -1253,6 +1499,16 @@ async fn handle_wake(inner: &Inner, local: &LocalAgent, replier: AgentReplier, p
                 None => stdout,
             };
             if ok {
+                // Claude Code does not fail on a depth it does not know: it warns and uses its
+                // default. The user should still hear that their setting did nothing.
+                let depth_only = Tuning { model: None, effort: tuning.effort.clone() };
+                if platforms::rejected_setting(&stderr, &depth_only) == Some(Rejected::Effort) {
+                    let note = format!(
+                        "⚠️ 設定的思考深度「{}」不被接受，這次改用了預設的深度。請到「這台電腦的 Coding Agent」頁面修改我的「思考深度」。",
+                        tuning.effort.as_deref().unwrap_or_default()
+                    );
+                    post_as_agent(inner, local, &payload, note).await;
+                }
                 if recorded {
                     // Codex names its sessions itself (event stream or app server); Claude
                     // Code uses the id it was given.
@@ -1269,7 +1525,26 @@ async fn handle_wake(inner: &Inner, local: &LocalAgent, replier: AgentReplier, p
                 text.push('\n');
                 text.push_str(&stderr);
                 let detail = tail(&text, 300).unwrap_or_default();
-                let why = format!("執行時發生錯誤（{status}）。{detail}");
+                let name = platform.map(|p| p.name()).unwrap_or("Coding Agent");
+                // The tool is the judge of models and depths; when that is why it failed, say
+                // which setting to change instead of showing a raw error.
+                // Of everything it printed, the line that carries the verdict.
+                let verdict = text.lines().find(|l| platforms::rejected_setting(l, &tuning).is_some());
+                let detail = verdict.map(|l| one_line(l, 300)).unwrap_or(detail);
+                let why = match platforms::rejected_setting(&text, &tuning) {
+                    Some(Rejected::Model) => format!(
+                        "{name} 不接受設定的模型「{}」（可能名稱打錯，或這個帳號不能用）。請到「這台電腦的 Coding Agent」頁面修改我的「模型」，或清空改用預設，再 @ 我一次。{name} 的訊息：{}",
+                        tuning.model.as_deref().unwrap_or_default(),
+                        one_line(&detail, 200)
+                    ),
+                    Some(Rejected::Effort) => format!(
+                        "{name} 不接受設定的思考深度「{}」（{}這個模型不支援）。請到「這台電腦的 Coding Agent」頁面修改我的「思考深度」，或改回預設，再 @ 我一次。{name} 的訊息：{}",
+                        tuning.effort.as_deref().unwrap_or_default(),
+                        tuning.model.as_deref().map(|m| format!("{m} ")).unwrap_or_default(),
+                        one_line(&detail, 200)
+                    ),
+                    None => format!("執行時發生錯誤（{status}）。{detail}"),
+                };
                 notify_failure(inner, local, &payload, &why).await;
             }
             text
@@ -1538,11 +1813,25 @@ pub fn routes() -> Router<AppState> {
         .route("/api/local-agents/{platform}", delete(remove))
         .route("/api/local-agents/{platform}/role", put(set_role))
         .route("/api/local-agents/{platform}/access", put(set_access))
-        .route("/api/local-agents/projects", get(list_projects))
+        .route("/api/local-agents/{platform}/model", put(set_tuning))
+        .route("/api/local-agents/projects", get(list_projects).post(create_project))
+        .route("/api/local-agents/projects/check", post(check_project))
+        .route("/api/local-agents/projects/name", put(rename_project))
+        .route("/api/local-agents/conversations/{conversation_id}", axum::routing::patch(rename_conversation))
+        .route("/api/local-agents/conversations/{conversation_id}/archive", post(archive_conversation))
         .route("/api/local-agents/projects/{conversation_id}", put(set_project).delete(clear_project))
         .route("/api/local-agents/work", get(list_work))
         .route("/api/local-agents/work/{id}/merge", post(merge_work))
         .route("/api/local-agents/work/{id}/discard", post(discard_work))
+}
+
+async fn set_tuning(
+    State(s): State<AppState>,
+    CurrentMember(_): CurrentMember,
+    Path(platform): Path<String>,
+    Json(b): Json<TuningInput>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(manager(&s)?.set_tuning(&platform, &b)?))
 }
 
 async fn set_access(
@@ -1565,6 +1854,48 @@ async fn set_project(
     Json(b): Json<ProjectInput>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(manager(&s)?.set_project(&m, conversation_id, &b.path).await?))
+}
+
+async fn create_project(
+    State(s): State<AppState>,
+    CurrentMember(m): CurrentMember,
+    Json(b): Json<NewProjectInput>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(manager(&s)?.create_project_conversation(&m, b).await?))
+}
+
+async fn check_project(
+    State(s): State<AppState>,
+    CurrentMember(_): CurrentMember,
+    Json(b): Json<ProjectInput>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(manager(&s)?.check_project(&b.path)?))
+}
+
+async fn rename_project(
+    State(s): State<AppState>,
+    CurrentMember(_): CurrentMember,
+    Json(b): Json<ProjectNameInput>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(manager(&s)?.rename_project(&b)?))
+}
+
+async fn rename_conversation(
+    State(s): State<AppState>,
+    CurrentMember(m): CurrentMember,
+    Path(conversation_id): Path<Uuid>,
+    Json(b): Json<RenameInput>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(manager(&s)?.rename_conversation(&m, conversation_id, &b.name).await?))
+}
+
+async fn archive_conversation(
+    State(s): State<AppState>,
+    CurrentMember(m): CurrentMember,
+    Path(conversation_id): Path<Uuid>,
+) -> ApiResult<impl IntoResponse> {
+    manager(&s)?.archive_conversation(&m, conversation_id).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn clear_project(

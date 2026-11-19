@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import AgentTuning from './AgentTuning'
 import {
   localApi,
   type LocalAccess,
@@ -362,6 +363,7 @@ export default function LocalAgentsPage({ onOpen, onError }: Props) {
                   </span>
                 </label>
               )}
+              {p.agent && <AgentTuning platform={p} onSaved={() => load(false)} onError={onError} />}
               {(p.agent || picked.has(p.id)) && (
                 <div className="local-role">
                   <label className="connect-field">
@@ -481,15 +483,18 @@ export default function LocalAgentsPage({ onOpen, onError }: Props) {
           <section className="local-section">
             <h2>專案資料夾</h2>
             <p className="muted small">
-              把對話綁定到這台電腦上的一個資料夾，裡面的 Coding Agent 就在那個資料夾工作。沒有綁定的對話，它們只能聊天（在使用者資料夾裡唯讀執行）。請填專案自己的資料夾的完整路徑，不能是整個磁碟或整個使用者資料夾。
+              專案就是一個資料夾：綁定到同一個資料夾的對話屬於同一個專案，在側邊欄的「Coding Agent」底下列在一起。要開新專案或在專案裡多開一個對話，用側邊欄的「＋」比較快；這裡可以更改或移除每個對話的資料夾。沒有綁定的對話，Coding Agent 只能聊天（在自己的空白資料夾裡唯讀執行）。請填專案自己的資料夾的完整路徑，不能是整個磁碟或整個使用者資料夾。
             </p>
-            {projects.map((c) => {
+            {[...projects]
+              .sort((a, b) => (a.path ?? '\uffff').localeCompare(b.path ?? '\uffff') || a.name.localeCompare(b.name))
+              .map((c) => {
               const typed = paths[c.conversation_id]
               const value = typed ?? c.path ?? ''
               return (
                 <div key={c.conversation_id} className="local-project">
                   <div className="local-project-name">
                     <b>{c.name}</b>
+                    {c.project_name && <span className="tag" title={c.path ?? ''}>專案：{c.project_name}</span>}
                     <span className="muted small">{c.agents.map((a) => '@' + a).join('、') || '沒有這台電腦的 Coding Agent'}</span>
                     {c.path && <span className={`pill ${c.exists ? (c.is_git ? 'good' : '') : 'warn'}`}>{!c.exists ? '資料夾不存在' : c.is_git ? '是 git 專案' : '不是 git 專案'}</span>}
                   </div>

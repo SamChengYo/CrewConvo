@@ -208,6 +208,26 @@ impl Store {
         })
     }
 
+    /// Renames a channel. Conflict when another channel of the workspace has that name.
+    pub async fn rename_conversation(&self, conversation_id: Uuid, name: &str) -> AppResult<Conversation> {
+        let sql = format!("UPDATE conversations AS c SET name = $2 WHERE c.id = $1 RETURNING {CONV_COLS}");
+        let row: ConversationRow =
+            sqlx::query_as(AssertSqlSafe(sql)).bind(conversation_id).bind(name).fetch_one(&self.pool).await.db()?;
+        row.into_model()
+    }
+
+    /// Archives a conversation: it leaves everybody's lists and takes no more messages. Nothing
+    /// is deleted. None when it was archived already.
+    pub async fn archive_conversation(&self, conversation_id: Uuid) -> AppResult<Option<Conversation>> {
+        let sql = format!(
+            "UPDATE conversations AS c SET archived_at = now() WHERE c.id = $1 AND c.archived_at IS NULL \
+             RETURNING {CONV_COLS}"
+        );
+        let row: Option<ConversationRow> =
+            sqlx::query_as(AssertSqlSafe(sql)).bind(conversation_id).fetch_optional(&self.pool).await.db()?;
+        row.map(ConversationRow::into_model).transpose()
+    }
+
     pub async fn set_frozen(&self, conversation_id: Uuid, frozen: bool) -> AppResult<Conversation> {
         let sql =
             format!("UPDATE conversations AS c SET frozen_until_human = $2 WHERE c.id = $1 RETURNING {CONV_COLS}");

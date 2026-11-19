@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { api, type Agent, type ConversationDetail, type Member, type MessageView, type WakeStatus } from '../api'
+import { api, type Agent, type ConversationDetail, type LocalProject, type Member, type MessageView, type WakeStatus } from '../api'
 import { useRealtime } from '../realtime'
 import { Avatar } from './Avatar'
 import Composer from './Composer'
@@ -20,6 +20,8 @@ const PAGE = 50
 interface Props {
   me: Member
   conversationId: string
+  /** The coding-agent project this conversation belongs to, when it is one. */
+  project?: LocalProject
   members: Member[]
   agents: Agent[]
   onRead: (id: string, seq: number) => void
@@ -103,7 +105,7 @@ function MessageList({
   )
 }
 
-export default function ConversationView({ me, conversationId, members, agents, onRead, onError, onLeft, onOpenAgent }: Props) {
+export default function ConversationView({ me, conversationId, project, members, agents, onRead, onError, onLeft, onOpenAgent }: Props) {
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
   const [messages, setMessages] = useState<MessageView[]>([])
   const [hasMore, setHasMore] = useState(false)
@@ -290,6 +292,18 @@ export default function ConversationView({ me, conversationId, members, agents, 
               <span>{title}</span>
               <span className="conv-caret">▾</span>
             </button>
+            {project &&
+              (project.path ? (
+                <span className="conv-project" title={`專案資料夾：${project.path}`}>
+                  📁 {project.project_name}
+                  <span className="conv-project-path">{project.path}</span>
+                  {!project.exists && <span className="pill warn">找不到資料夾</span>}
+                </span>
+              ) : (
+                <span className="conv-project muted" title="這個對話還沒有綁定專案資料夾：Coding Agent 在這裡只能聊天。到「這台電腦的 Coding Agent」頁面綁定，或從側邊欄「新增專案」開一個新的對話">
+                  📁 未指定專案
+                </span>
+              ))}
             {detail.topic && <span className="conv-topic">{detail.topic}</span>}
           </div>
           <div className="conv-head-right">

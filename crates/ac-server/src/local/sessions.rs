@@ -377,6 +377,28 @@ mod tests {
     }
 
     #[test]
+    fn two_conversations_in_one_folder_keep_to_their_own_sessions_by_rule() {
+        // A project that is not a git repository: both conversations run in the folder itself.
+        let d = dir("same-folder");
+        let s = Sessions::load(&d);
+        let (agent, first, second, thread) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3), Uuid::from_u128(4));
+        for (id, conv, th) in [("first", first, None), ("second", second, None), ("first-thread", first, Some(thread))] {
+            let mut r = rec(id, agent, conv, th, 0, 1);
+            r.dir = Some("/work/shop".into());
+            s.add(r);
+        }
+        let here = s.candidates("claude-code", agent, Some("/work/shop"), Utc::now());
+        // All three are in this folder, so all three are what the decision model may choose
+        // from; the rules that need no model never cross conversations.
+        assert_eq!(here.len(), 3);
+        assert_eq!(by_conversation(&here, first, None).map(|r| r.id.as_str()), Some("first"));
+        assert_eq!(by_conversation(&here, second, None).map(|r| r.id.as_str()), Some("second"));
+        assert_eq!(by_thread(&here, Some(thread)).map(|r| r.id.as_str()), Some("first-thread"));
+        assert!(by_conversation(&here, Uuid::from_u128(9), None).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn purpose_says_what_it_is_for_and_what_it_did_last() {
         let long = "請幫我".repeat(40);
         let p = initial_purpose("#dev", &format!("  第一行\n第二行 {long}"));

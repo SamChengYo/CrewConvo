@@ -211,6 +211,48 @@ impl Service {
         Ok(())
     }
 
+    /// Gives a channel another name. Members only; direct messages have no name.
+    pub async fn rename_channel(&self, actor: &Member, conversation_id: Uuid, name: &str) -> AppResult<Conversation> {
+        require_human(actor)?;
+        let conv = self.member_conversation(actor, conversation_id).await?;
+        if conv.kind != ConversationKind::Channel {
+            return Err(AppError::bad_request("私訊沒有名稱可以改"));
+        }
+        let name = validate_channel_name(name)?;
+        let renamed = self.inner.store.rename_conversation(conversation_id, &name).await.map_err(|e| match e {
+            AppError::Conflict(_) => AppError::Conflict(format!("頻道 #{name} 已存在")),
+            other => other,
+        })?;
+        self.inner.engine.bus().publish(RealtimeEvent::ConversationUpdated { conversation: renamed.clone() });
+        Ok(renamed)
+    }
+
+    /// Archives a channel: it disappears from the lists and takes no more messages; its
+    /// history stays in the database. Pending work for agents in it is cancelled first.
+    pub async fn archive_channel(&self, actor: &Member, conversation_id: Uuid) -> AppResult<()> {
+        require_human(actor)?;
+        let conv = self.member_conversation(actor, conversation_id).await?;
+        if conv.kind != ConversationKind::Channel {
+            return Err(AppError::bad_request("只有頻道可以封存"));
+        }
+        if conv.name.as_deref() == Some("general") {
+            return Err(AppError::bad_request("#general 是所有人的頻道，不能封存"));
+        }
+        let members = self.inner.store.conversation_members(conversation_id).await?;
+        self.inner.engine.stop_conversation(conversation_id).await?;
+        if self.inner.store.archive_conversation(conversation_id).await?.is_some() {
+            // Everybody's list of conversations has one fewer.
+            for m in members {
+                self.inner.engine.bus().publish(RealtimeEvent::MembershipChanged {
+                    conversation_id,
+                    member_id: m.member_id,
+                    joined: false,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Human "stop" button (spec 6.7).
     pub async fn stop_conversation(&self, actor: &Member, conversation_id: Uuid) -> AppResult<Vec<Wake>> {
         require_human(actor)?;

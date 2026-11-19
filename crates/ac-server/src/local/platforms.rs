@@ -35,7 +35,94 @@ pub enum Live {
     /// Claude Code `--input-format stream-json`: each user message is one JSON line on stdin.
     ClaudeStream,
     /// `codex app-server`: JSON-RPC on stdin/stdout (`thread/start`, `turn/start`, `turn/steer`).
-    CodexServer { sandbox: &'static str, resume: Option<String> },
+    CodexServer { sandbox: &'static str, resume: Option<String>, model: Option<String>, effort: Option<String> },
+}
+
+/// Which model a coding agent runs with and how hard it thinks. Empty: whatever the tool
+/// itself would use — nothing is passed, and the tool is started exactly as without this.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tuning {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl Tuning {
+    pub fn new(model: Option<&str>, effort: Option<&str>) -> Self {
+        let clean = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+        Tuning { model: clean(model), effort: clean(effort) }
+    }
+}
+
+/// One model a tool says the signed-in user can pick, with the thinking depths it takes.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ModelChoice {
+    pub id: String,
+    pub name: String,
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
+}
+
+/// Reads `codex debug models` (the catalog Codex itself picks from): the models shown in its
+/// own picker, each with the reasoning efforts it advertises.
+pub fn codex_models(json: &str) -> Vec<ModelChoice> {
+    let Ok(v) = serde_json::from_str::<Value>(json) else { return vec![] };
+    let list = v["models"].as_array().cloned().unwrap_or_default();
+    list.iter()
+        .filter(|m| m["visibility"].as_str().is_none_or(|x| x == "list"))
+        .filter_map(|m| {
+            let id = m["slug"].as_str()?.to_string();
+            let efforts = m["supported_reasoning_levels"]
+                .as_array()
+                .map(|l| l.iter().filter_map(|e| e["effort"].as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            Some(ModelChoice {
+                name: m["display_name"].as_str().unwrap_or(&id).to_string(),
+                id,
+                efforts,
+                default_effort: m["default_reasoning_level"].as_str().map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// A setting of ours that the tool (or the service behind it) refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejected {
+    Model,
+    Effort,
+}
+
+/// Whether a failed run failed because of the model or the thinking depth it was given. The
+/// tools are the judges of what is valid; this only recognises their verdicts:
+/// Claude Code "There's an issue with the selected model (x). It may not exist or you may not
+/// have access to it."; Codex "The 'x' model is not supported when using Codex with a ChatGPT
+/// account." and, for the depth, "[reasoning.effort] … Invalid value: 'x'. Supported values
+/// are: …".
+pub fn rejected_setting(output: &str, tuning: &Tuning) -> Option<Rejected> {
+    let t = output.to_lowercase();
+    if let Some(effort) = &tuning.effort {
+        let named = t.contains(&format!("invalid value: '{}'", effort.to_lowercase()));
+        if t.contains("reasoning.effort") || t.contains("reasoningeffort") || t.contains("unknown --effort value") || named {
+            return Some(Rejected::Effort);
+        }
+    }
+    if tuning.model.is_some() {
+        let verdicts = [
+            "issue with the selected model",
+            "model is not supported",
+            "modelnotfound",
+            "model_not_found",
+            "model not found",
+            "unrecognized_model",
+            "does not exist or you do not have access",
+            "invalid model",
+            "unknown model",
+        ];
+        if verdicts.iter().any(|v| t.contains(v)) {
+            return Some(Rejected::Model);
+        }
+    }
+    None
 }
 
 /// Settings of this server that change how the tools are started.
@@ -294,11 +381,25 @@ pub fn codex_status(output: &str, success: bool) -> Readiness {
 
 /// Runs a status command for at most 8 seconds: (exit code was 0, stdout, stderr).
 fn probe(program: &Path, args: &[&str]) -> Option<(bool, String, String)> {
+    use std::io::Read;
     let mut child = quiet_command(program).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
+    // Read while it runs: a long answer (Codex's model catalog) fills the pipe, and a program
+    // that cannot write never exits.
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut bytes);
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    };
+    let out = reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err = reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
     let started = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() > Duration::from_secs(8) => {
                 let _ = child.kill();
                 return None;
@@ -306,10 +407,8 @@ fn probe(program: &Path, args: &[&str]) -> Option<(bool, String, String)> {
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(_) => return None,
         }
-    }
-    let out = child.wait_with_output().ok()?;
-    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-    Some((out.status.success(), text(&out.stdout), text(&out.stderr)))
+    };
+    Some((status.success(), out.join().ok()?, err.join().ok()?))
 }
 
 /// A command that never opens a console window (the desktop app has none of its own).
@@ -848,12 +947,14 @@ impl Platform {
         session: SessionArg<'_>,
         access: Access,
         opts: &RunOptions,
+        tuning: &Tuning,
     ) -> Option<Invocation> {
         let program = self.runner()?;
         let mut inv = self.invocation_with(program, prompt, tools, session, access);
         if opts.live {
             self.make_live(&mut inv, session, access);
         }
+        self.tune(&mut inv, tuning);
         if self == Platform::Codex
             && let Some(mode) = &opts.codex_windows_sandbox
         {
@@ -861,6 +962,77 @@ impl Platform {
             inv.args.splice(1..1, ["-c".to_string(), format!("windows.sandbox={mode}")]);
         }
         Some(inv)
+    }
+
+    /// Whether the model and the thinking depth of this tool can be chosen with flags that have
+    /// been checked against the real program.
+    pub fn tunable(self) -> bool {
+        matches!(self, Platform::ClaudeCode | Platform::Codex)
+    }
+
+    /// The thinking depths this tool accepts, weakest first. Claude Code: its `--effort`
+    /// choices. Codex: what every model in its catalog takes; the page offers the chosen
+    /// model's own list when the catalog can be read.
+    pub fn efforts(self) -> &'static [&'static str] {
+        match self {
+            Platform::ClaudeCode | Platform::Codex => &["low", "medium", "high", "xhigh", "max"],
+            _ => &[],
+        }
+    }
+
+    /// Model names to suggest when the tool cannot list them: the aliases its own help names.
+    pub fn model_hints(self) -> &'static [&'static str] {
+        match self {
+            Platform::ClaudeCode => &["fable", "opus", "sonnet"],
+            _ => &[],
+        }
+    }
+
+    /// The models the tool itself lists for the signed-in user; empty when it has no such
+    /// command (Claude Code) or it failed. Starts the tool: callers keep the answer.
+    pub fn models(self) -> Vec<ModelChoice> {
+        if self != Platform::Codex {
+            return vec![];
+        }
+        let Some(exe) = codex_exe() else { return vec![] };
+        probe(&exe, &["debug", "models"]).map(|(_, out, _)| codex_models(&out)).unwrap_or_default()
+    }
+
+    /// Adds the chosen model and thinking depth. With neither set nothing changes at all.
+    fn tune(self, inv: &mut Invocation, tuning: &Tuning) {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        match self {
+            // The same flags for a new and a resumed session, with text and with stream-json.
+            Platform::ClaudeCode => {
+                if let Some(m) = &tuning.model {
+                    inv.args.extend(s(&["--model", m]));
+                }
+                if let Some(e) = &tuning.effort {
+                    inv.args.extend(s(&["--effort", e]));
+                }
+            }
+            Platform::Codex => match &mut inv.live {
+                // The app server takes them in its requests (`model` when the thread is
+                // opened, `effort` when the turn starts), not on the command line.
+                Some(Live::CodexServer { model, effort, .. }) => {
+                    *model = tuning.model.clone();
+                    *effort = tuning.effort.clone();
+                }
+                // `codex exec -s <mode> …`: options of `exec`, so they also sit before `resume`.
+                _ => {
+                    let mut extra = Vec::new();
+                    if let Some(m) = &tuning.model {
+                        extra.extend(s(&["-m", m]));
+                    }
+                    if let Some(e) = &tuning.effort {
+                        extra.extend(s(&["-c", &format!("model_reasoning_effort={e}")]));
+                    }
+                    let at = inv.args.iter().position(|a| a == "-s").map_or(1, |i| i + 2);
+                    inv.args.splice(at..at, extra);
+                }
+            },
+            _ => {}
+        }
     }
 
     /// Switches an invocation to the protocol that keeps the tool listening while it works.
@@ -891,6 +1063,8 @@ impl Platform {
                         SessionArg::Resume(id) => Some(id.to_string()),
                         _ => None,
                     },
+                    model: None,
+                    effort: None,
                 });
             }
             _ => {}
@@ -1008,6 +1182,127 @@ mod tests {
         p.invocation_with(PathBuf::from("tool"), "prompt", &tools, session, access).args
     }
 
+    /// The arguments (and, for the Codex app server, the request values) of one run.
+    fn tuned(p: Platform, session: SessionArg<'_>, live: bool, tuning: &Tuning) -> Invocation {
+        let tools = vec!["post_message".to_string()];
+        let mut inv = p.invocation_with(PathBuf::from("tool"), "p", &tools, session, Access::Edit);
+        if live {
+            p.make_live(&mut inv, session, Access::Edit);
+        }
+        p.tune(&mut inv, tuning);
+        inv
+    }
+
+    #[test]
+    fn without_a_model_or_depth_every_run_is_started_exactly_as_before() {
+        let none = Tuning::default();
+        // Also what the page sends when both fields are left empty.
+        assert_eq!(Tuning::new(Some("  "), Some("")), none);
+        for p in ALL {
+            for live in [false, true] {
+                for session in [SessionArg::Unrecorded, SessionArg::New("n"), SessionArg::Resume("r")] {
+                    let tools = vec!["post_message".to_string()];
+                    let mut plain = p.invocation_with(PathBuf::from("tool"), "p", &tools, session, Access::Edit);
+                    if live {
+                        p.make_live(&mut plain, session, Access::Edit);
+                    }
+                    let with = tuned(p, session, live, &none);
+                    assert_eq!((with.args, with.live, with.stdin), (plain.args, plain.live, plain.stdin));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_code_gets_model_and_effort_flags_in_every_mode() {
+        let t = Tuning::new(Some(" opus "), Some("xhigh"));
+        for live in [false, true] {
+            for session in [SessionArg::New("n"), SessionArg::Resume("r")] {
+                let a = tuned(Platform::ClaudeCode, session, live, &t).args;
+                assert_eq!(value_of(&a, "--model"), Some("opus"));
+                assert_eq!(value_of(&a, "--effort"), Some("xhigh"));
+                // What was there stays there.
+                assert_eq!(value_of(&a, "--permission-mode"), Some("acceptEdits"));
+                assert_eq!(value_of(&a, "--output-format"), Some(if live { "stream-json" } else { "text" }));
+            }
+        }
+        let only_model = tuned(Platform::ClaudeCode, SessionArg::New("n"), true, &Tuning::new(Some("sonnet"), None)).args;
+        assert_eq!(value_of(&only_model, "--model"), Some("sonnet"));
+        assert!(!only_model.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn codex_gets_model_and_effort_as_exec_options_or_app_server_values() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let t = Tuning::new(Some("gpt-5.6-luna"), Some("high"));
+        // `exec`: before the session part, so also before `resume`.
+        assert_eq!(
+            tuned(Platform::Codex, SessionArg::New("n"), false, &t).args,
+            s(&["exec", "-s", "workspace-write", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--json", "-"])
+        );
+        assert_eq!(
+            tuned(Platform::Codex, SessionArg::Resume("abc"), false, &t).args,
+            s(&["exec", "-s", "workspace-write", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=high", "resume", "--skip-git-repo-check", "--json", "abc", "-"])
+        );
+        assert_eq!(
+            tuned(Platform::Codex, SessionArg::Unrecorded, false, &Tuning::new(None, Some("low"))).args,
+            s(&["exec", "-s", "workspace-write", "-c", "model_reasoning_effort=low", "--skip-git-repo-check", "-"])
+        );
+        // App server: nothing on the command line, both in the requests.
+        for session in [SessionArg::New("n"), SessionArg::Resume("abc")] {
+            let inv = tuned(Platform::Codex, session, true, &t);
+            assert_eq!(inv.args, s(&["app-server"]));
+            let Some(Live::CodexServer { model, effort, .. }) = inv.live else { panic!("not live") };
+            assert_eq!((model.as_deref(), effort.as_deref()), (Some("gpt-5.6-luna"), Some("high")));
+        }
+    }
+
+    #[test]
+    fn tools_without_checked_flags_are_not_given_any() {
+        let t = Tuning::new(Some("x"), Some("high"));
+        for p in [Platform::Cursor, Platform::OpenCode, Platform::Antigravity] {
+            assert!(!p.tunable() && p.efforts().is_empty());
+            assert_eq!(tuned(p, SessionArg::Unrecorded, true, &t).args, tuned(p, SessionArg::Unrecorded, true, &Tuning::default()).args);
+        }
+        assert!(Platform::ClaudeCode.tunable() && Platform::Codex.tunable());
+        assert_eq!(Platform::ClaudeCode.efforts(), ["low", "medium", "high", "xhigh", "max"]);
+    }
+
+    #[test]
+    fn reads_the_models_codex_lists() {
+        let json = r#"{"models":[
+            {"slug":"gpt-6.2-sol","display_name":"GPT-6.2-Sol","default_reasoning_level":"low","visibility":"list",
+             "supported_reasoning_levels":[{"effort":"low","description":"x"},{"effort":"ultra","description":"y"}]},
+            {"slug":"codex-auto-review","display_name":"Codex Auto Review","visibility":"hide","supported_reasoning_levels":[]}
+        ]}"#;
+        let models = codex_models(json);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-6.2-sol");
+        assert_eq!(models[0].name, "GPT-6.2-Sol");
+        assert_eq!(models[0].efforts, ["low", "ultra"]);
+        assert_eq!(models[0].default_effort.as_deref(), Some("low"));
+        assert!(codex_models("not json").is_empty());
+    }
+
+    #[test]
+    fn recognises_a_refused_model_or_depth() {
+        let both = Tuning::new(Some("no-such-model"), Some("bogus"));
+        let claude = "There's an issue with the selected model (no-such-model). It may not exist or you may not have access to it. Run --model to pick a different model.";
+        assert_eq!(rejected_setting(claude, &both), Some(Rejected::Model));
+        let codex = "The 'no-such-model' model is not supported when using Codex with a ChatGPT account.";
+        assert_eq!(rejected_setting(codex, &both), Some(Rejected::Model));
+        let effort = "[ReasoningEffortParam] [reasoning.effort] [invalid_enum_value] Invalid value: 'bogus'. Supported values are: 'none', 'minimal', 'low'";
+        assert_eq!(rejected_setting(effort, &both), Some(Rejected::Effort));
+        let app_server = "Invalid response.create payload: Invalid value: 'bogus'. Supported values are: 'none', 'minimal'";
+        assert_eq!(rejected_setting(app_server, &both), Some(Rejected::Effort));
+        let warned = "Warning: Unknown --effort value 'bogus' — ignoring it and using the default effort. Valid values: low, medium, high, xhigh, max.";
+        assert_eq!(rejected_setting(warned, &both), Some(Rejected::Effort));
+        // Some other failure, or a verdict about a setting we did not make.
+        assert_eq!(rejected_setting("rate limit reached", &both), None);
+        assert_eq!(rejected_setting(claude, &Tuning::default()), None);
+        assert_eq!(rejected_setting(effort, &Tuning::new(Some("m"), None)), None);
+    }
+
     #[test]
     fn live_protocols_keep_the_access_flags_and_the_session() {
         let tools = vec!["post_message".to_string()];
@@ -1031,13 +1326,16 @@ mod tests {
             Platform::Codex.invocation_with(PathBuf::from("codex"), "p", &tools, SessionArg::Resume("t-1"), Access::Full);
         Platform::Codex.make_live(&mut x, SessionArg::Resume("t-1"), Access::Full);
         assert_eq!(x.args, ["app-server", "-c", "sandbox_workspace_write.network_access=true"]);
-        assert_eq!(x.live, Some(Live::CodexServer { sandbox: "workspace-write", resume: Some("t-1".into()) }));
+        assert_eq!(
+            x.live,
+            Some(Live::CodexServer { sandbox: "workspace-write", resume: Some("t-1".into()), model: None, effort: None })
+        );
         assert!(!x.json_events && x.stdin.as_deref() == Some("p"));
 
         let mut r = Platform::Codex.invocation_with(PathBuf::from("codex"), "p", &tools, SessionArg::New("n"), Access::Read);
         Platform::Codex.make_live(&mut r, SessionArg::New("n"), Access::Read);
         assert_eq!(r.args, ["app-server"]);
-        assert_eq!(r.live, Some(Live::CodexServer { sandbox: "read-only", resume: None }));
+        assert_eq!(r.live, Some(Live::CodexServer { sandbox: "read-only", resume: None, model: None, effort: None }));
 
         // Tools without such a protocol run as before.
         let mut o = Platform::OpenCode.invocation_with(PathBuf::from("o"), "p", &tools, SessionArg::Unrecorded, Access::Read);

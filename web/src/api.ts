@@ -432,7 +432,28 @@ export interface LocalPlatform {
   default_role: string
   /** A wake can continue an earlier session of this tool. */
   keeps_sessions: boolean
-  agent: { agent_id: string; handle: string; online: boolean; description: string; expertise: string[]; access: LocalAccess } | null
+  /** The model and the thinking depth of this tool can be chosen. */
+  tunable: boolean
+  /** The thinking depths the tool accepts, weakest first (the tool's own words). */
+  efforts: string[]
+  /** The models the tool itself lists; empty when it cannot list any. */
+  models: { id: string; name: string; efforts: string[]; default_effort: string | null }[]
+  /** Names to suggest when there is no list. */
+  model_hints: string[]
+  agent: {
+    agent_id: string
+    handle: string
+    online: boolean
+    description: string
+    expertise: string[]
+    access: LocalAccess
+    /** null: the tool's own default. */
+    model: string | null
+    effort: string | null
+    /** What the tool last said it actually ran on. */
+    used_model: string | null
+    used_effort: string | null
+  } | null
 }
 
 /** ready: signed in. needs_login: not signed in. no_cli: only usable from inside the app. unknown: cannot tell. */
@@ -452,10 +473,23 @@ export interface LocalRole {
 export interface LocalProject {
   conversation_id: string
   name: string
+  is_channel: boolean
+  /** What the project (the folder) is called; null when the conversation has no folder. */
+  project_name: string | null
+  /** The folder is one of the user's catch-all folders (Downloads, Desktop…) itself. */
+  catch_all: boolean
   agents: string[]
   path: string | null
   exists: boolean
   is_git: boolean
+}
+
+export interface LocalProjectCheck {
+  path: string
+  project_name: string
+  /** How many conversations this folder already has as a project. */
+  conversations: number
+  warnings: string[]
 }
 
 /** What an agent did in its own working copy (a git worktree) that is not merged yet. */
@@ -529,6 +563,14 @@ export const localApi = {
   list: (refresh = false) => request<LocalAgentsInfo>('GET', refresh ? '/api/local-agents?refresh=true' : '/api/local-agents'),
   setAccess: (platform: string, access: LocalAccess) => request<{ access: LocalAccess }>('PUT', `/api/local-agents/${platform}/access`, { access }),
   projects: () => request<{ projects: LocalProject[] }>('GET', '/api/local-agents/projects'),
+  /** Looks at a folder before making it a project: how it is written, its name, warnings. Changes nothing. */
+  checkProject: (path: string) => request<LocalProjectCheck>('POST', '/api/local-agents/projects/check', { path }),
+  /** A new conversation in the project that is this folder (creating the project if it is new). */
+  createProject: (body: { path: string; name?: string; conversation_name?: string }) =>
+    request<{ conversation: { id: string; name: string }; path: string; project_name: string; warnings: string[] }>('POST', '/api/local-agents/projects', body),
+  renameProject: (path: string, name: string) => request<{ path: string; project_name: string }>('PUT', '/api/local-agents/projects/name', { path, name }),
+  renameConversation: (id: string, name: string) => request<{ id: string; name: string }>('PATCH', `/api/local-agents/conversations/${id}`, { name }),
+  archiveConversation: (id: string) => request<unknown>('POST', `/api/local-agents/conversations/${id}/archive`),
   setProject: (conversationId: string, path: string) =>
     request<{ path: string; exists: boolean; is_git: boolean }>('PUT', `/api/local-agents/projects/${conversationId}`, { path }),
   clearProject: (conversationId: string) => request<unknown>('DELETE', `/api/local-agents/projects/${conversationId}`),
@@ -538,6 +580,9 @@ export const localApi = {
   install: (body: { platforms: string[]; group_name?: string; channel_name?: string; roles?: Record<string, LocalRole> }) =>
     request<LocalInstallResult>('POST', '/api/local-agents/install', body),
   remove: (platform: string) => request<unknown>('DELETE', `/api/local-agents/${platform}`),
+  /** Model and thinking depth; an empty string goes back to the tool's default. */
+  setTuning: (platform: string, body: { model: string; effort: string }) =>
+    request<{ model: string | null; effort: string | null }>('PUT', `/api/local-agents/${platform}/model`, body),
   setRole: (platform: string, role: LocalRole) =>
     request<{ description: string; expertise: string[] }>('PUT', `/api/local-agents/${platform}/role`, role),
   sessions: () => request<LocalSessionsInfo>('GET', '/api/local-agents/sessions'),
