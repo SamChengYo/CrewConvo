@@ -419,18 +419,59 @@ export interface LocalPlatform {
   detected: boolean
   /** Has a command-line program, so it can answer when mentioned. */
   can_wake: boolean
-  note: string
+  /** Whether it can actually be woken; null when it is not on this computer. */
+  state: LocalReadiness | null
+  explanation: string
+  /** For `needs_login`: what to run in a terminal. */
+  login_command: string | null
+  /** What it may do to files can be limited (otherwise the access level does not apply). */
+  limits_access: boolean
   /** The description a new agent gets when none is written. */
   default_role: string
   /** A wake can continue an earlier session of this tool. */
   keeps_sessions: boolean
-  agent: { agent_id: string; handle: string; online: boolean; description: string; expertise: string[] } | null
+  agent: { agent_id: string; handle: string; online: boolean; description: string; expertise: string[]; access: LocalAccess } | null
 }
+
+/** ready: signed in. needs_login: not signed in. no_cli: only usable from inside the app. unknown: cannot tell. */
+export type LocalReadiness = 'ready' | 'needs_login' | 'no_cli' | 'unknown'
+
+/** What a coding agent may do to the project's files when its owner asks. */
+export type LocalAccess = 'read' | 'edit' | 'full'
 
 /** What one coding agent is responsible for. */
 export interface LocalRole {
   description?: string
   expertise?: string[]
+  access?: LocalAccess
+}
+
+/** A conversation with local coding agents in it, and the folder they work in. */
+export interface LocalProject {
+  conversation_id: string
+  name: string
+  agents: string[]
+  path: string | null
+  exists: boolean
+  is_git: boolean
+}
+
+/** What an agent did in its own working copy (a git worktree) that is not merged yet. */
+export interface LocalWork {
+  id: string
+  agent_handle: string
+  conversation_name: string
+  thread_root_id: string | null
+  project: string
+  worktree: string
+  branch: string
+  base_branch: string | null
+  last_used_at: string
+  /** Commits on its branch that the project does not have. */
+  ahead: number
+  diffstat: string
+  /** False when the worktree or the project folder is gone. */
+  exists: boolean
 }
 
 /** A session of a coding agent's command-line tool that CrewConvo started, and what it is for. */
@@ -462,14 +503,33 @@ export interface LocalAgentsInfo {
 }
 
 export interface LocalInstallResult {
-  results: { platform: string; name: string; handle: string; ok: boolean; lines: string[]; can_wake: boolean; note: string }[]
+  results: {
+    platform: string
+    name: string
+    handle: string
+    ok: boolean
+    lines: string[]
+    can_wake: boolean
+    state: LocalReadiness
+    explanation: string
+    login_command: string | null
+  }[]
   group: string | null
   channel: { id: string; name: string } | null
   warnings: string[]
 }
 
 export const localApi = {
-  list: () => request<LocalAgentsInfo>('GET', '/api/local-agents'),
+  /** `refresh` checks again whether each coding agent is signed in instead of using the last answer. */
+  list: (refresh = false) => request<LocalAgentsInfo>('GET', refresh ? '/api/local-agents?refresh=true' : '/api/local-agents'),
+  setAccess: (platform: string, access: LocalAccess) => request<{ access: LocalAccess }>('PUT', `/api/local-agents/${platform}/access`, { access }),
+  projects: () => request<{ projects: LocalProject[] }>('GET', '/api/local-agents/projects'),
+  setProject: (conversationId: string, path: string) =>
+    request<{ path: string; exists: boolean; is_git: boolean }>('PUT', `/api/local-agents/projects/${conversationId}`, { path }),
+  clearProject: (conversationId: string) => request<unknown>('DELETE', `/api/local-agents/projects/${conversationId}`),
+  work: () => request<{ work: LocalWork[] }>('GET', '/api/local-agents/work'),
+  mergeWork: (id: string) => request<{ ok: boolean; branch: string; into: string | null }>('POST', `/api/local-agents/work/${id}/merge`),
+  discardWork: (id: string) => request<unknown>('POST', `/api/local-agents/work/${id}/discard`),
   install: (body: { platforms: string[]; group_name?: string; channel_name?: string; roles?: Record<string, LocalRole> }) =>
     request<LocalInstallResult>('POST', '/api/local-agents/install', body),
   remove: (platform: string) => request<unknown>('DELETE', `/api/local-agents/${platform}`),

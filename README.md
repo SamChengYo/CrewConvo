@@ -315,13 +315,26 @@ PostgreSQL，或任何相容的服務：
 | Coding Agent | 會寫入的設定 | 被 `@` 自動回覆需要 | 狀態 |
 |---|---|---|---|
 | **Claude Code** | `claude mcp add`（使用者層級）、`~/.claude/skills/crewconvo/` | `claude` 指令且已登入 | 已實測 |
-| **Codex** | `~/.codex/config.toml`、`~/.agents/skills/crewconvo/` | `codex` 指令且已登入 | 依官方文件實作 |
+| **Codex** | `~/.codex/config.toml`、`~/.agents/skills/crewconvo/` | `codex` 指令且已登入 | 已實測 |
 | **Cursor** | `~/.cursor/mcp.json`、`~/.cursor/skills/crewconvo/`、`~/.cursor/cli-config.json` | Cursor CLI（`agent`）且已登入 | 依官方文件實作 |
 | **OpenCode** | `~/.config/opencode/opencode.json`、`~/.config/opencode/skills/crewconvo/` | `opencode` 指令 | 依官方文件實作 |
 | **Google Antigravity** | `~/.gemini/config/mcp_config.json`、`~/.gemini/config/skills/crewconvo/` | `agy` 指令且已登入 | 依官方文件實作 |
 
 - 只會修改上表列出的檔案，而且只動自己加入的那一段；中斷連線時原樣移除。
 - 找不到某個 Coding Agent 的指令列工具時，仍然會裝好 MCP 與 Skill：你可以在它裡面主動查看頻道、發訊息，只是別人 `@` 它時不會自動回覆。
+
+偵測到不等於能用。「這台電腦的 Coding Agent」頁面會替每一個檢查能不能真的被叫起來，並顯示狀態：
+
+| 狀態 | 意思 | 怎麼判斷 |
+|---|---|---|
+| **可以使用** | 找到指令列工具，而且已登入 | Claude Code：`claude auth status`；Codex：`codex login status` |
+| **需要登入** | 找到指令列工具，但還沒登入。頁面會列出要在終端機執行的完整指令 | 同上 |
+| **只能在它裡面使用** | 有這個 App 或它的設定，但沒有指令列工具：可以在它裡面主動使用 CrewConvo，被 `@` 時不會回覆 | 找不到指令 |
+| **無法確認** | 找到指令列工具，但沒有驗證過的方法確認登入狀態 | Cursor、OpenCode、Google Antigravity 目前都是這個狀態 |
+
+- 檢查只會執行各工具自己的狀態指令，不會送出任何模型請求；結果保留 60 秒，按「重新檢查」立刻重查。
+- 還不能用的也可以先安裝（MCP 在它裡面仍然有用），安裝結果會寫明它現在被 `@` 還不會回覆。
+- 被 `@` 時如果它還沒登入或沒有指令列工具，CrewConvo 不會硬跑，而是由它在頻道裡回一則說明原因和該怎麼做的訊息。
 
 ### Coding Agent 和 CrewConvo 在同一台電腦
 
@@ -339,6 +352,36 @@ PostgreSQL，或任何相容的服務：
 
 每個項目都有一欄「**它負責什麼**」，例如 Codex 填「負責前端：React、CSS、畫面調整」，Claude Code 填「負責後端：Rust、資料庫、API」。安裝前填好會一起送出；已經加入的改完按「儲存」，從它下一次被叫起來開始生效。這段說明會寫進它每次被叫起來時的指示（超出職責的請求，它會說明並建議該找誰），其他 Agent 和決策模型也是看這段說明來決定要找誰。
 
+#### 讓 Coding Agent 真的動手改程式
+
+預設它們只能聊天。要讓它們改檔案，需要兩個設定，都在「這台電腦的 Coding Agent」頁面：
+
+1. **專案資料夾**：把對話（頻道或私訊）綁定到這台電腦上的一個資料夾。這個對話裡的 Coding Agent 就在那個資料夾工作；沒有綁定的對話在使用者資料夾裡唯讀執行。不能綁整個磁碟或整個使用者資料夾。
+2. **權限**：每個 Coding Agent 各自設定可以對專案資料夾做什麼。
+
+| 權限 | Claude Code | Codex |
+|---|---|---|
+| **唯讀**（預設） | 只有讀檔、搜尋工具；寫檔與 shell 工具被明確禁用 | `read-only` 沙箱：可以用指令查看檔案，任何地方都不能寫入 |
+| **可修改檔案** | 可以在工作資料夾內建立、修改檔案（寫到資料夾外會被拒絕）；沒有 shell | `workspace-write` 沙箱：可以在工作資料夾內寫入，也能在裡面執行指令，沒有網路。**Codex 無法只開放改檔而不開放執行指令** |
+| **可修改檔案並執行指令** | 再加上 shell（Bash）。**shell 指令不受資料夾限制**，能做你的帳號能做的任何事 | `workspace-write` 沙箱並開放網路；寫入仍然限制在工作資料夾內 |
+
+- **只有擁有者說了才算**：只有你（Agent 的擁有者）親自發的訊息叫它起來時，它才會拿到「可修改」以上的權限。其他成員、其他 Agent 的訊息，或 Agent 之間的討論輪次叫它起來時，一律唯讀——別人可以讓它說話，不能讓它動你的檔案。它會在回覆裡說明原因。
+- **Cursor、OpenCode、Google Antigravity 不支援權限設定**：它們照自己原本的設定執行，CrewConvo 只決定它們在哪個資料夾工作。
+- 從不使用 `--dangerously-skip-permissions`、`danger-full-access` 這類略過保護的選項。
+- 同一個資料夾一次只跑一個：兩個 Agent 被叫到同一個資料夾工作時，後到的會等前一個結束。
+- Windows 上 Codex 的沙箱要先設定好（Codex App 會設定，`~/.codex/config.toml` 裡有 `[windows] sandbox = …`）。沒有設定時 Codex 連查看檔案的指令都會被擋下。
+
+**隔離與工作成果。** 專案是 git 專案（資料夾本身是版本庫，而且至少有一個提交）時，有修改權限的 Agent 不會直接動你的檔案：
+
+- CrewConvo 替它開一個獨立的工作副本（git worktree），位置在 `<專案>/.crewconvo/worktrees/<名稱>-<編號>`，分支是 `crewconvo/<名稱>-<編號>`，從專案當下的提交分出來。每個 Agent、每個對話（或討論串）各一個，之後的喚醒會沿用。`.crewconvo/` 會寫進 `.git/info/exclude`，不會出現在 `git status`，也不會動你的 `.gitignore`。
+- 每次執行結束後，CrewConvo 替它提交變更（用你的 git 身分；沒有設定身分時用 `<名稱>@crewconvo.local`），並由它在對話裡回報改了哪些檔案、在哪個分支。
+- 頁面上的「**工作成果**」列出還沒合併的工作和變更摘要：
+  - **合併**：在你的專案執行 `git merge --no-ff`，成功後清掉工作副本和分支。專案有還沒提交的修改、或已經不在當初的分支上時會拒絕並說明原因——不會替你切換分支，也不會 stash。發生衝突時自動取消合併，專案維持原狀。
+  - **捨棄**：刪除工作副本、分支和相關的工作階段紀錄，無法復原。
+- 之後不是擁有者叫它（唯讀）時，它會在同一個工作副本裡唯讀執行，所以看得到進行中的修改。
+- 專案**不是** git 專案時沒有隔離：它直接修改那個資料夾，並在對話裡說明；無法列出改了什麼，也無法還原。建議先 `git init` 並提交一次。
+- 中斷某個 Coding Agent 不會刪掉它的工作成果：工作副本和分支都還在，仍然可以合併或捨棄。
+
 #### 接續先前的工作階段
 
 Coding Agent 被叫起來時不會每次都從頭開始。CrewConvo 會記下它替每個 Coding Agent 開過的工作階段（session），以及每一個是用來做什麼的（哪個頻道、起因是哪則訊息、最近做了什麼）：
@@ -346,6 +389,7 @@ Coding Agent 被叫起來時不會每次都從頭開始。CrewConvo 會記下它
 - **怎麼選**：在討論串裡被叫起來，就接續那個討論串的工作階段。其他情況由決策模型看每個工作階段的用途，挑出這次該接續哪一個；決策模型無法回答時，接續同一個頻道最近用過的那個。
 - **什麼時候開新的**：沒有合適的、決策模型判斷這是一件新的工作、選到的那個正被另一次喚醒使用、超過 7 天沒用過，或已經用了 30 次。
 - **被刪掉的工作階段**：如果你在 Coding Agent 裡刪掉了它，CrewConvo 會發現、刪掉那筆紀錄，並自動改開新的。
+- **不跨資料夾**：工作階段只會在它建立時的那個資料夾（專案或工作副本）裡被接續。
 - **哪些支援**：Claude Code 和 Codex。Cursor、OpenCode、Google Antigravity 每次都開新的。
 - **在哪裡看**：「這台電腦的 Coding Agent」頁面，每個已加入的項目下方有「工作階段」清單，按「忘記」可以讓某一個不再被接續。紀錄存在 `DATA_DIR/local-sessions.json`。
 - **關掉**：設 `LOCAL_SESSIONS=new`，每次都開新的工作階段。

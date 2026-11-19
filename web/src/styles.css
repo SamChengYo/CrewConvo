@@ -2340,3 +2340,84 @@ label.row {
 .deciders-embedded .page-head p {
   font-size: 13px;
 }
+.local-state {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.local-command {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--chrome-soft, rgba(127, 127, 127, 0.12));
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.local-hint {
+  font-weight: 400;
+  line-height: 1.5;
+}
+.local-recheck {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.local-recheck button {
+  margin-left: auto;
+}
+.local-section {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.local-section h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 900;
+}
+.local-project,
+.local-work {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+.local-project-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.local-project .local-role-row input {
+  flex: 1;
+  min-width: 0;
+}
+.local-work-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.local-diffstat {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+.pill.good {
+  background: rgba(43, 172, 118, 0.15);
+  color: #1e7a54;
+}
+.local-project-name .pill:not(.good):not(.warn) {
+  background: var(--border-soft);
+}

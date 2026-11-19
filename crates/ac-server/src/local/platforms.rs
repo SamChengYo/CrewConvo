@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use super::access::Access;
+
 pub const MCP_NAME: &str = "crewconvo";
 const SKILL: &str = include_str!("../../../../clients/python/crewconvo/SKILL.md");
 const BEGIN: &str = "# >>> crewconvo (managed by `crewconvo setup`; edits here are overwritten) >>>";
@@ -223,11 +225,69 @@ pub fn codex_exe() -> Option<PathBuf> {
     newest(files)
 }
 
-/// Whether the Claude Code CLI is signed in; None when that cannot be determined.
-fn claude_logged_in(exe: &Path) -> Option<bool> {
-    let out = quiet_command(exe).args(["auth", "status"]).output().ok()?;
-    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    v.get("loggedIn")?.as_bool()
+/// Whether a coding agent can actually be woken, not just whether it is installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Readiness {
+    /// Command-line program found and signed in.
+    Ready,
+    /// Command-line program found, not signed in.
+    NeedsLogin,
+    /// The app or its settings are there, but no command-line program: usable from inside
+    /// the app, cannot be woken.
+    NoCli,
+    /// Command-line program found; there is no checked way to tell whether it is signed in.
+    Unknown,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Status {
+    pub state: Readiness,
+    pub explanation: String,
+    /// For `needs_login`: what to run in a terminal.
+    pub login_command: Option<String>,
+}
+
+/// `claude auth status` prints JSON with `loggedIn` (exit code 0 signed in, 1 not).
+pub fn claude_status(stdout: &str) -> Readiness {
+    match serde_json::from_str::<Value>(stdout.trim()).ok().and_then(|v| v.get("loggedIn")?.as_bool()) {
+        Some(true) => Readiness::Ready,
+        Some(false) => Readiness::NeedsLogin,
+        None => Readiness::Unknown,
+    }
+}
+
+/// `codex login status` prints "Logged in using …" (exit code 0) or "Not logged in" (exit code 1).
+pub fn codex_status(output: &str, success: bool) -> Readiness {
+    let t = output.to_lowercase();
+    if t.contains("not logged in") {
+        Readiness::NeedsLogin
+    } else if success && t.contains("logged in") {
+        Readiness::Ready
+    } else {
+        // Something else went wrong (a broken config, a changed message): do not guess.
+        Readiness::Unknown
+    }
+}
+
+/// Runs a status command for at most 8 seconds: (exit code was 0, stdout, stderr).
+fn probe(program: &Path, args: &[&str]) -> Option<(bool, String, String)> {
+    let mut child = quiet_command(program).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() > Duration::from_secs(8) => {
+                let _ = child.kill();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return None,
+        }
+    }
+    let out = child.wait_with_output().ok()?;
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    Some((out.status.success(), text(&out.stdout), text(&out.stderr)))
 }
 
 /// A command that never opens a console window (the desktop app has none of its own).
@@ -471,18 +531,55 @@ impl Platform {
         }
     }
 
-    /// What the user still has to do before this one answers when mentioned (checked now).
-    pub fn status_note(self) -> String {
-        if self == Platform::ClaudeCode
-            && let Some(exe) = claude_exe()
-            && claude_logged_in(&exe) == Some(false)
-        {
-            return format!(
-                "指令列版的 Claude Code 還沒有登入，所以被 @ 時無法回覆。在終端機執行「{}」，輸入 /login 登入一次即可",
-                exe.display()
-            );
+    /// Checks now whether this one can be woken. Starts the tool's own status command (never
+    /// a model request); takes up to 8 seconds, so callers keep the answer for a while.
+    pub fn status(self) -> Status {
+        let Some(exe) = self.runner() else {
+            let extra = self.wake_note();
+            return Status {
+                state: Readiness::NoCli,
+                explanation: format!(
+                    "找不到它的指令列工具：可以在它裡面主動使用 CrewConvo，但被 @ 時無法自動回覆。{extra}"
+                ),
+                login_command: None,
+            };
+        };
+        let (state, login) = match self {
+            Platform::ClaudeCode => {
+                let state = probe(&exe, &["auth", "status"]).map(|(_, out, _)| claude_status(&out));
+                (state.unwrap_or(Readiness::Unknown), "auth login")
+            }
+            Platform::Codex => {
+                let state = probe(&exe, &["login", "status"])
+                    .map(|(ok, out, err)| codex_status(&format!("{out}\n{err}"), ok));
+                (state.unwrap_or(Readiness::Unknown), "login")
+            }
+            // No status command of these has been checked against the real tool.
+            Platform::Cursor | Platform::OpenCode | Platform::Antigravity => (Readiness::Unknown, ""),
+        };
+        let name = self.name();
+        match state {
+            Readiness::Ready => Status {
+                state,
+                explanation: "指令列工具已登入，被 @ 時會在這台電腦上被叫起來回覆。".into(),
+                login_command: None,
+            },
+            Readiness::NeedsLogin => Status {
+                state,
+                explanation: format!(
+                    "指令列版的 {name} 還沒有登入，所以被 @ 時無法回覆。在終端機執行下面的指令登入一次，再按「重新檢查」。"
+                ),
+                login_command: Some(format!("\"{}\" {login}", exe.display())),
+            },
+            _ => {
+                let extra = self.wake_note();
+                Status {
+                    state: Readiness::Unknown,
+                    explanation: format!("找到指令列工具，但無法確認它是否已登入；沒有登入的話被 @ 時不會回覆。{extra}"),
+                    login_command: None,
+                }
+            }
         }
-        self.wake_note().to_string()
     }
 
     /// What has to be true before this one can be woken, when that is not obvious.
@@ -714,9 +811,33 @@ impl Platform {
         matches!(self, Platform::ClaudeCode | Platform::Codex)
     }
 
-    /// How to run one wake. `tools` are the MCP tool names this agent may use.
-    pub fn invocation(self, prompt: &str, tools: &[String], session: SessionArg<'_>) -> Option<Invocation> {
+    /// Whether what this tool may do to files can be limited with flags that have been checked.
+    /// The others run as they always did; only the working directory applies to them.
+    pub fn limits_access(self) -> bool {
+        matches!(self, Platform::ClaudeCode | Platform::Codex)
+    }
+
+    /// How to run one wake. `tools` are the MCP tool names this agent may use; `access` is
+    /// what it may do to the files in its working directory.
+    pub fn invocation(
+        self,
+        prompt: &str,
+        tools: &[String],
+        session: SessionArg<'_>,
+        access: Access,
+    ) -> Option<Invocation> {
         let program = self.runner()?;
+        Some(self.invocation_with(program, prompt, tools, session, access))
+    }
+
+    fn invocation_with(
+        self,
+        program: PathBuf,
+        prompt: &str,
+        tools: &[String],
+        session: SessionArg<'_>,
+        access: Access,
+    ) -> Invocation {
         // Windows passes arguments to .cmd launchers through cmd.exe, which cannot carry line breaks.
         let is_script = program
             .extension()
@@ -728,12 +849,31 @@ impl Platform {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let (args, stdin) = match self {
             Platform::ClaudeCode => {
-                let allowed = if tools.is_empty() {
+                let mut allowed = if tools.is_empty() {
                     format!("mcp__{MCP_NAME}")
                 } else {
                     tools.iter().map(|t| format!("mcp__{MCP_NAME}__{t}")).collect::<Vec<_>>().join(",")
                 };
+                // Without a terminal, a tool that is not allowed is refused instead of asked about.
+                allowed.push_str(",Read,Glob,Grep");
+                if access == Access::Full {
+                    allowed.push_str(",Bash");
+                }
                 let mut args = s(&["-p", "--allowedTools", &allowed, "--output-format", "text"]);
+                // Edits are not put on the allow list: `acceptEdits` accepts them inside the
+                // working directory only, an allowed `Edit` would accept them anywhere.
+                if access.writes() {
+                    args.extend(s(&["--permission-mode", "acceptEdits"]));
+                }
+                // Denied outright, so nothing in the user's own Claude Code settings can allow it.
+                let denied = match access {
+                    Access::Read => "Edit,Write,MultiEdit,NotebookEdit,Bash",
+                    Access::Edit => "Bash",
+                    Access::Full => "",
+                };
+                if !denied.is_empty() {
+                    args.extend(s(&["--disallowedTools", denied]));
+                }
                 match session {
                     SessionArg::Unrecorded => {}
                     SessionArg::New(id) => args.extend(s(&["--session-id", id])),
@@ -741,14 +881,21 @@ impl Platform {
                 }
                 (args, Some(prompt.to_string()))
             }
-            // `-` reads the whole prompt from stdin; the default sandbox stays read-only.
+            // `-` reads the whole prompt from stdin.
             Platform::Codex => {
-                let args = match session {
-                    SessionArg::Unrecorded => s(&["exec", "--skip-git-repo-check", "-"]),
+                // The sandbox is Codex's own: read-only cannot write anywhere; workspace-write
+                // can write in the working directory and run commands there, without network
+                // unless that is switched on. It goes before `resume`, which does not take `-s`.
+                let mut args = s(&["exec", "-s", if access.writes() { "workspace-write" } else { "read-only" }]);
+                if access == Access::Full {
+                    args.extend(s(&["-c", "sandbox_workspace_write.network_access=true"]));
+                }
+                args.extend(match session {
+                    SessionArg::Unrecorded => s(&["--skip-git-repo-check", "-"]),
                     // `--json` is the only way to learn the id of the session Codex creates.
-                    SessionArg::New(_) => s(&["exec", "--skip-git-repo-check", "--json", "-"]),
-                    SessionArg::Resume(id) => s(&["exec", "resume", "--skip-git-repo-check", "--json", id, "-"]),
-                };
+                    SessionArg::New(_) => s(&["--skip-git-repo-check", "--json", "-"]),
+                    SessionArg::Resume(id) => s(&["resume", "--skip-git-repo-check", "--json", id, "-"]),
+                });
                 (args, Some(prompt.to_string()))
             }
             Platform::Cursor => (s(&["-p", &as_arg(), "--approve-mcps", "--output-format", "text"]), None),
@@ -756,7 +903,7 @@ impl Platform {
             Platform::Antigravity => (s(&["-p", &as_arg(), "--output-format", "text"]), None),
         };
         let json_events = self == Platform::Codex && session != SessionArg::Unrecorded;
-        Some(Invocation { program, args, stdin, json_events })
+        Invocation { program, args, stdin, json_events }
     }
 }
 
@@ -787,6 +934,94 @@ mod tests {
         assert_eq!(ev.last_message.as_deref(), Some("done"));
         assert!(ev.errors.is_empty());
         assert_eq!(codex_events("plain text"), CodexEvents::default());
+    }
+
+    fn args(p: Platform, session: SessionArg<'_>, access: Access) -> Vec<String> {
+        let tools = vec!["post_message".to_string(), "react".to_string()];
+        p.invocation_with(PathBuf::from("tool"), "prompt", &tools, session, access).args
+    }
+
+    fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+    }
+
+    #[test]
+    fn claude_code_gets_exactly_the_tools_of_its_level() {
+        let mcp = "mcp__crewconvo__post_message,mcp__crewconvo__react";
+        let read = args(Platform::ClaudeCode, SessionArg::New("id-1"), Access::Read);
+        assert_eq!(value_of(&read, "--allowedTools"), Some(format!("{mcp},Read,Glob,Grep").as_str()));
+        assert_eq!(value_of(&read, "--disallowedTools"), Some("Edit,Write,MultiEdit,NotebookEdit,Bash"));
+        assert_eq!(value_of(&read, "--permission-mode"), None);
+        assert_eq!(value_of(&read, "--session-id"), Some("id-1"));
+
+        let edit = args(Platform::ClaudeCode, SessionArg::Resume("id-1"), Access::Edit);
+        assert_eq!(value_of(&edit, "--allowedTools"), Some(format!("{mcp},Read,Glob,Grep").as_str()));
+        assert_eq!(value_of(&edit, "--permission-mode"), Some("acceptEdits"));
+        assert_eq!(value_of(&edit, "--disallowedTools"), Some("Bash"));
+        assert_eq!(value_of(&edit, "--resume"), Some("id-1"));
+
+        let full = args(Platform::ClaudeCode, SessionArg::Unrecorded, Access::Full);
+        assert_eq!(value_of(&full, "--allowedTools"), Some(format!("{mcp},Read,Glob,Grep,Bash").as_str()));
+        assert_eq!(value_of(&full, "--permission-mode"), Some("acceptEdits"));
+        assert_eq!(value_of(&full, "--disallowedTools"), None);
+        for a in [&read, &edit, &full] {
+            assert!(!a.iter().any(|x| x.contains("dangerously") || x == "bypassPermissions"));
+        }
+    }
+
+    #[test]
+    fn codex_gets_the_sandbox_of_its_level() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            args(Platform::Codex, SessionArg::Unrecorded, Access::Read),
+            s(&["exec", "-s", "read-only", "--skip-git-repo-check", "-"])
+        );
+        assert_eq!(
+            args(Platform::Codex, SessionArg::New("x"), Access::Edit),
+            s(&["exec", "-s", "workspace-write", "--skip-git-repo-check", "--json", "-"])
+        );
+        // `resume` takes no `-s`: the sandbox has to come before it.
+        assert_eq!(
+            args(Platform::Codex, SessionArg::Resume("abc"), Access::Full),
+            s(&[
+                "exec",
+                "-s",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "resume",
+                "--skip-git-repo-check",
+                "--json",
+                "abc",
+                "-"
+            ])
+        );
+        for access in [Access::Read, Access::Edit, Access::Full] {
+            let a = args(Platform::Codex, SessionArg::Resume("abc"), access);
+            assert!(!a.iter().any(|x| x.contains("danger")));
+        }
+    }
+
+    #[test]
+    fn the_other_tools_run_as_before_whatever_the_level() {
+        for p in [Platform::Cursor, Platform::OpenCode, Platform::Antigravity] {
+            assert!(!p.limits_access());
+            assert_eq!(args(p, SessionArg::Unrecorded, Access::Read), args(p, SessionArg::Unrecorded, Access::Full));
+        }
+        assert!(Platform::ClaudeCode.limits_access() && Platform::Codex.limits_access());
+    }
+
+    #[test]
+    fn reads_the_login_state_each_tool_prints() {
+        assert_eq!(claude_status("{\n  \"loggedIn\": true,\n  \"authMethod\": \"claude.ai\"\n}"), Readiness::Ready);
+        assert_eq!(claude_status("{\"loggedIn\": false, \"authMethod\": \"none\"}"), Readiness::NeedsLogin);
+        assert_eq!(claude_status("Usage: claude auth"), Readiness::Unknown);
+        assert_eq!(claude_status(""), Readiness::Unknown);
+        assert_eq!(codex_status("\nLogged in using ChatGPT\n", true), Readiness::Ready);
+        assert_eq!(codex_status("Logged in using an API key - sk-***", true), Readiness::Ready);
+        assert_eq!(codex_status("Not logged in\n", false), Readiness::NeedsLogin);
+        assert_eq!(codex_status("Error loading config.toml: bad", false), Readiness::Unknown);
+        assert_eq!(codex_status("", true), Readiness::Unknown);
     }
 
     #[test]

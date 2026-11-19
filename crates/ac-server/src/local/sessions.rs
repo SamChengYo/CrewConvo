@@ -36,6 +36,11 @@ pub struct SessionRecord {
     pub created_at: DateTime<Utc>,
     pub last_used_at: DateTime<Utc>,
     pub uses: u32,
+    /// The folder the session was created in; None is the home folder (also for records
+    /// written before folders existed). A session only continues in the folder it knows:
+    /// Claude Code cannot find it from anywhere else, and its notes are about those files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -131,7 +136,13 @@ impl Sessions {
 
     /// The sessions a new wake of this agent may continue: its own, on the same tool, not worn
     /// out and not in use. Drops records nobody has touched for a long time.
-    pub fn candidates(&self, platform: &str, agent_id: Uuid, now: DateTime<Utc>) -> Vec<SessionRecord> {
+    pub fn candidates(
+        &self,
+        platform: &str,
+        agent_id: Uuid,
+        dir: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Vec<SessionRecord> {
         let mut state = self.state.lock().unwrap();
         let before = state.records.len();
         state.records.retain(|r| now - r.last_used_at <= Duration::days(KEEP_DAYS));
@@ -141,7 +152,7 @@ impl Sessions {
         state
             .records
             .iter()
-            .filter(|r| r.platform == platform && r.agent_id == agent_id)
+            .filter(|r| r.platform == platform && r.agent_id == agent_id && r.dir.as_deref() == dir)
             .filter(|r| !worn_out(r, now) && !state.busy.contains(&r.id))
             .cloned()
             .collect()
@@ -188,6 +199,16 @@ impl Sessions {
         removed
     }
 
+    /// Removes the records of the sessions created in a folder that is going away.
+    pub fn forget_dir(&self, dir: &str) {
+        let mut state = self.state.lock().unwrap();
+        let before = state.records.len();
+        state.records.retain(|r| r.dir.as_deref() != Some(dir));
+        if state.records.len() != before {
+            self.save(&state);
+        }
+    }
+
     /// Removes the records of an agent that was disconnected.
     pub fn forget_agent(&self, agent_id: Uuid) {
         let mut state = self.state.lock().unwrap();
@@ -222,6 +243,7 @@ mod tests {
             created_at: at,
             last_used_at: at,
             uses,
+            dir: None,
         }
     }
 
@@ -263,16 +285,16 @@ mod tests {
         codex.platform = "codex".into();
         s.add(codex);
         let ids = |v: Vec<SessionRecord>| v.into_iter().map(|r| r.id).collect::<Vec<_>>();
-        assert_eq!(ids(s.candidates("claude-code", agent, Utc::now())), vec!["fresh"]);
+        assert_eq!(ids(s.candidates("claude-code", agent, None, Utc::now())), vec!["fresh"]);
         // Untouched for 30 days: the record itself is gone, also from the file.
         assert!(!s.list().iter().any(|r| r.id == "ancient"));
         assert!(!Sessions::load(&d).list().iter().any(|r| r.id == "ancient"));
         // In use by a running wake: a second wake cannot take it.
         assert!(s.claim("fresh"));
         assert!(!s.claim("fresh"));
-        assert!(s.candidates("claude-code", agent, Utc::now()).is_empty());
+        assert!(s.candidates("claude-code", agent, None, Utc::now()).is_empty());
         s.release("fresh");
-        assert_eq!(ids(s.candidates("claude-code", agent, Utc::now())), vec!["fresh"]);
+        assert_eq!(ids(s.candidates("claude-code", agent, None, Utc::now())), vec!["fresh"]);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -285,8 +307,36 @@ mod tests {
         assert!(s.forget("gone"));
         assert!(!s.forget("gone"));
         assert!(!s.claim("gone"));
-        assert!(s.candidates("claude-code", agent, Utc::now()).is_empty());
+        assert!(s.candidates("claude-code", agent, None, Utc::now()).is_empty());
         assert!(Sessions::load(&d).list().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_session_only_continues_in_the_folder_it_was_created_in() {
+        let d = dir("folders");
+        let s = Sessions::load(&d);
+        let (agent, conv) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        // Written before folders existed: counts as the home folder.
+        s.add(rec("home", agent, conv, None, 0, 1));
+        let mut project = rec("project", agent, conv, None, 0, 1);
+        project.dir = Some("C:\\proj".into());
+        s.add(project);
+        let mut worktree = rec("worktree", agent, conv, None, 0, 1);
+        worktree.dir = Some("C:\\proj\\.crewconvo\\worktrees\\claude-1".into());
+        s.add(worktree);
+        let ids = |dir: Option<&str>| {
+            s.candidates("claude-code", agent, dir, Utc::now()).into_iter().map(|r| r.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(None), vec!["home"]);
+        assert_eq!(ids(Some("C:\\proj")), vec!["project"]);
+        assert_eq!(ids(Some("C:\\proj\\.crewconvo\\worktrees\\claude-1")), vec!["worktree"]);
+        assert!(ids(Some("C:\\elsewhere")).is_empty());
+        // The old record is read back without a folder.
+        assert_eq!(Sessions::load(&d).list().iter().find(|r| r.id == "home").unwrap().dir, None);
+        s.forget_dir("C:\\proj\\.crewconvo\\worktrees\\claude-1");
+        assert!(ids(Some("C:\\proj\\.crewconvo\\worktrees\\claude-1")).is_empty());
+        assert_eq!(s.list().len(), 2);
         let _ = std::fs::remove_dir_all(&d);
     }
 
